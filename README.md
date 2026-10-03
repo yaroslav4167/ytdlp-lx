@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Designer.png" alt="yt-dlp Telegram Bot" width="420">
+</p>
+
 # yt-dlp Telegram Bot
 
 Telegram bot for downloading media and audio from supported `yt-dlp` sites. It supports direct links, text search, audio/video selection, Spotify track lookup, Coub looping, and retrying Telegram requests.
