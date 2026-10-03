@@ -1,0 +1,16 @@
+[Unit]
+Description=yt-dlp Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ytdlp-lx
+EnvironmentFile=/opt/ytdlp-lx/.env
+ExecStart=/opt/ytdlp-lx/.venv/bin/python /opt/ytdlp-lx/main.py
+Restart=on-failure
+RestartSec=5
+User=ytbot
+
+[Install]
+WantedBy=multi-user.target

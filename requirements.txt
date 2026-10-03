@@ -1,0 +1,4 @@
+aiohttp>=3.9
+python-telegram-bot>=22.0
+requests>=2.31
+yt-dlp>=2026.08.19
