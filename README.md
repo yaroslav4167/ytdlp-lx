@@ -32,7 +32,7 @@ git clone <repository-url> ytdlp-lx
 cd ytdlp-lx
 chmod +x install.sh
 ./install.sh
-编辑 .env
+nano .env
 .venv/bin/python main.py
 ```
 
