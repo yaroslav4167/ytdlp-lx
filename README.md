@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Designer.png" alt="yt-dlp Telegram Bot" width="420">
+  <img src="banner.png" alt="yt-dlp Telegram Bot" width="960">
 </p>
 
 # yt-dlp Telegram Bot

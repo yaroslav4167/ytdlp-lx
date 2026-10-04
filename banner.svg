@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07152e"/>
+      <stop offset="0.55" stop-color="#0b2d5c"/>
+      <stop offset="1" stop-color="#087cb5"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#31b8ff" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#31b8ff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <circle cx="1080" cy="80" r="330" fill="url(#glow)"/>
+  <circle cx="260" cy="620" r="300" fill="url(#glow)" opacity="0.7"/>
+  <path d="M0 540 C260 420 380 720 690 550 S1070 310 1280 420" fill="none" stroke="#55c8ff" stroke-opacity="0.2" stroke-width="2"/>
+  <image x="70" y="70" width="500" height="500" preserveAspectRatio="xMidYMid meet" href="Designer.png" xlink:href="Designer.png" filter="url(#shadow)"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#fff">
+    <text x="640" y="238" font-size="68" font-weight="700">yt-dlp</text>
+    <text x="640" y="316" font-size="58" font-weight="700" fill="#65d0ff">Telegram Bot</text>
+    <text x="644" y="378" font-size="24" fill="#c8e7f7">Download media. Choose quality. Keep control.</text>
+    <rect x="644" y="430" width="170" height="6" rx="3" fill="#65d0ff"/>
+    <text x="644" y="478" font-size="21" fill="#9bc8df">Proxy fallback  •  FFmpeg  •  Media tests</text>
+  </g>
+</svg>
