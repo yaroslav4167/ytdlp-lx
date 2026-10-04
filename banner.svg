@@ -19,9 +19,9 @@
   <path d="M0 540 C260 420 380 720 690 550 S1070 310 1280 420" fill="none" stroke="#55c8ff" stroke-opacity="0.2" stroke-width="2"/>
   <image x="70" y="70" width="500" height="500" preserveAspectRatio="xMidYMid meet" href="Designer.png" xlink:href="Designer.png" filter="url(#shadow)"/>
   <g font-family="Arial, Helvetica, sans-serif" fill="#fff">
-    <text x="640" y="238" font-size="68" font-weight="700">yt-dlp</text>
-    <text x="640" y="316" font-size="58" font-weight="700" fill="#65d0ff">Telegram Bot</text>
-    <text x="644" y="378" font-size="24" fill="#c8e7f7">Download media. Choose quality. Keep control.</text>
+    <text x="640" y="220" font-size="68" font-weight="700">YTDlp-LX</text>
+    <text x="640" y="302" font-size="58" font-weight="700" fill="#65d0ff">Telegram bot</text>
+    <text x="644" y="368" font-size="30" fill="#c8e7f7">Simply downloader</text>
     <rect x="644" y="430" width="170" height="6" rx="3" fill="#65d0ff"/>
     <text x="644" y="478" font-size="21" fill="#9bc8df">Proxy fallback  •  FFmpeg  •  Media tests</text>
   </g>
