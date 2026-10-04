@@ -133,6 +133,13 @@ async def test_internal_url_blocking():
     print("PASS internal URL blocking")
 
 
+async def test_readable_filename():
+    filename = main.safe_download_filename(
+        {"uploader": "Test/User", "title": "A: sample? video"}, "mp4")
+    assert filename == "Test_User - A_ sample_ video.mp4", filename
+    print(f"PASS readable filename: {filename}")
+
+
 class TimedMessage:
     chat_id = 123
 
@@ -216,6 +223,7 @@ async def main_test():
     await test_telegram_retry()
     await test_text_search_output()
     await test_internal_url_blocking()
+    await test_readable_filename()
     await test_message_response_timing()
     await test_telegram_retry_bounded()
 

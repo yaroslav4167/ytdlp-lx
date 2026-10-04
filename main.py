@@ -783,6 +783,15 @@ def safe_meta(text: str) -> str:
     text = text.replace('"', "'")  # убираем двойные кавычки
     return text
 
+def safe_download_filename(info, extension):
+    """Build a readable Telegram filename without unsafe path characters."""
+    title = str(info.get('title') or 'download')
+    uploader = str(info.get('uploader') or '').strip()
+    name = f'{uploader} - {title}' if uploader else title
+    name = re.sub(r'[\x00-\x1f\x7f/\\:*?"<>|]+', '_', name)
+    name = re.sub(r'\s+', ' ', name).strip(' ._') or 'download'
+    return f'{name[:180]}.{extension.lstrip(".")}'
+
 def media_duration(path: str):
     try:
         result = subprocess.run(
@@ -845,7 +854,10 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
 
     async def send_file():
         with open(filename, 'rb') as stream:
-            file_to_send = InputFile(stream, filename=os.path.basename(filename))
+            file_to_send = InputFile(
+                stream,
+                filename=safe_download_filename(info, ext),
+            )
             if ext in audio_exts:
                 return await context.bot.send_audio(chat_id=chat_id, audio=file_to_send)
             elif ext in document_exts:
