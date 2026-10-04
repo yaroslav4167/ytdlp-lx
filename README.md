@@ -8,7 +8,7 @@ Telegram bot for downloading media and audio from supported `yt-dlp` sites. It s
 
 ## Features
 
-- Instagram, TikTok, Coub, Pornhub, XV-ru, YouTube, Spotify lookup, and other `yt-dlp` extractors.
+- Instagram, TikTok, Coub, YouTube, Spotify lookup, and other `yt-dlp` extractors.
 - Separate audio/video streams are merged with FFmpeg.
 - Coub video is looped until its full audio track ends.
 - Output is kept under Telegram's 50 MiB bot upload limit where possible.
@@ -86,7 +86,7 @@ sudo journalctl -u ytdlp-lx -f
 
 ## Tests
 
-The smoke test checks downloads and valid audio/video streams for representative Instagram, TikTok, Coub, XV-ru, and Pornhub URLs. It also checks Telegram retry behavior and text-search output.
+The smoke test checks downloads, valid audio/video streams, Telegram retry behavior, and text-search output.
 
 ```bash
 .venv/bin/python test_ytdlp_smoke.py
