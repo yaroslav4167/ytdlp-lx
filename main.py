@@ -2,8 +2,6 @@ import os
 import asyncio
 import time
 import aiohttp
-import io
-import base64
 import uuid
 import re
 import html
@@ -14,14 +12,21 @@ import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
+# Runtime configuration. Secrets are supplied through the environment.
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
 DOWNLOAD_DIR = "downloads"
 DOWNLOAD_PROXY = os.environ.get("DOWNLOAD_PROXY", "")
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024
+STALE_FILE_AGE = 600
+MAX_CALLBACK_LINKS = 32
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-def cleanup_stale_downloads(max_age=600):
+# ---------------------------------------------------------------------------
+# Filesystem and network safety
+# ---------------------------------------------------------------------------
+def cleanup_stale_downloads(max_age=STALE_FILE_AGE):
     now = time.time()
     prefixes = ("video_", "audio_", "input_", "output_")
     try:
@@ -34,6 +39,9 @@ def cleanup_stale_downloads(max_age=600):
 
 cleanup_stale_downloads()
 
+# ---------------------------------------------------------------------------
+# yt-dlp integration and proxy fallback
+# ---------------------------------------------------------------------------
 def get_yt_dlp():
     import yt_dlp
     return yt_dlp
@@ -133,6 +141,9 @@ def validate_external_url(url):
                 or ip.is_reserved or ip.is_unspecified):
             raise ValueError('Private or local network addresses are not allowed')
 
+# ---------------------------------------------------------------------------
+# URL normalization and Spotify lookup
+# ---------------------------------------------------------------------------
 def normalize_url(text: str):
     text = text.strip()
     if not text.startswith(("http://", "https://")):
@@ -390,13 +401,22 @@ async def url_media_types(url: str):
     if not info:
         return False, False
     formats = info.get('formats', [])
-    has_audio = any(f.get('acodec') not in (None, 'none') for f in formats)
-    has_video = any(f.get('vcodec') not in (None, 'none') for f in formats)
+    has_audio = any(format_has_audio(f) for f in formats)
+    has_video = any(format_has_video(f) for f in formats)
     direct_exts = {f.get('ext') for f in formats if f.get('url')}
     has_audio = has_audio or bool(direct_exts & {'mp3', 'm4a', 'aac', 'ogg', 'opus', 'wav'})
     has_video = has_video or bool(direct_exts & {'mp4', 'webm', 'mkv', 'mov', 'avi'})
     return has_audio, has_video
 
+def format_has_audio(fmt):
+    return fmt.get('acodec') not in (None, 'none') or fmt.get('audio_ext') not in (None, 'none')
+
+def format_has_video(fmt):
+    return fmt.get('vcodec') not in (None, 'none') or fmt.get('video_ext') not in (None, 'none')
+
+# ---------------------------------------------------------------------------
+# Media download, conversion and Telegram delivery
+# ---------------------------------------------------------------------------
 async def download_media(url: str, format_choice: str, progress_cb=None):
     yt_dlp = get_yt_dlp()
     loop = asyncio.get_running_loop()
@@ -421,7 +441,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
         info = ydl_probe.extract_info(url, download=False)
 
         formats = info.get("formats", [])
-        max_size = 50 * 1024 * 1024  # 50 MB
+        max_size = MAX_UPLOAD_SIZE
 
         # --- MP3 ---
         if format_choice == "mp3":
@@ -644,16 +664,13 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
 
             videos = [
                 f for f in formats
-                if (
-                    f.get("vcodec") not in (None, "none")
-                    or f.get("video_ext") not in (None, "none")
-                )
+                if format_has_video(f)
                 and f.get("acodec") in (None, "none")
             ]
 
             audios = [
                 f for f in formats
-                if f.get("acodec") not in (None, "none")
+                if format_has_audio(f)
                 and f.get("vcodec") in (None, "none")
             ]
 
@@ -791,6 +808,9 @@ def downloaded_size(path: str) -> int:
         raise Exception("Could not prepare a non-empty file for sending")
     return size
 
+# ---------------------------------------------------------------------------
+# Telegram handlers and per-user callback state
+# ---------------------------------------------------------------------------
 async def download_and_send(context, source_message, url, format_choice, msg=None, delete_source=False):
     cleanup_stale_downloads()
     chat_id = source_message.chat_id
@@ -873,7 +893,7 @@ async def search_youtube(query: str):
 
 def store_callback_url(context, url):
     links = context.user_data.setdefault('media_links', {})
-    if len(links) >= 32:
+    if len(links) >= MAX_CALLBACK_LINKS:
         links.pop(next(iter(links)))
     import hashlib
     url_id = hashlib.md5(url.encode()).hexdigest()[:8]
