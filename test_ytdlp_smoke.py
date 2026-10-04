@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import main
@@ -111,7 +112,7 @@ async def test_text_search_output():
     assert results, "text search returned no results"
     assert len(results) <= 8, "search returned more than eight results"
 
-    keyboard = await main.make_results_keyboard(results)
+    keyboard = await main.make_results_keyboard(results, SimpleNamespace(user_data={}))
     rows = keyboard.inline_keyboard
     lines = ["Found tracks:"]
     for index, info in enumerate(results, start=1):
@@ -120,6 +121,16 @@ async def test_text_search_output():
     assert len(lines) == len(results) + 1, "search output lines do not match results"
     assert len(rows) == len(results), "search keyboard rows do not match results"
     print(f"PASS text search: {len(results)} results, {len(rows)} keyboard rows")
+
+
+async def test_internal_url_blocking():
+    for url in ("http://127.0.0.1/", "http://localhost/", "http://169.254.169.254/"):
+        try:
+            main.validate_external_url(url)
+        except ValueError:
+            continue
+        raise AssertionError(f"internal URL was not blocked: {url}")
+    print("PASS internal URL blocking")
 
 
 class TimedMessage:
@@ -152,7 +163,7 @@ async def test_message_response_timing():
         async def fake_search(_query):
             return [{"id": "test", "title": "Test result", "uploader": "Test uploader"}]
 
-        async def fake_keyboard(_results):
+        async def fake_keyboard(_results, _context):
             return object()
 
         main.search_youtube = fake_search
@@ -204,6 +215,7 @@ async def main_test():
     await test_downloads()
     await test_telegram_retry()
     await test_text_search_output()
+    await test_internal_url_blocking()
     await test_message_response_timing()
     await test_telegram_retry_bounded()
 

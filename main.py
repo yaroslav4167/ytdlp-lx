@@ -7,7 +7,10 @@ import base64
 import uuid
 import re
 import html
+import shlex
 import subprocess
+import ipaddress
+import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
@@ -47,8 +50,6 @@ def ydl_options(options=None):
 class ProxyRetryYoutubeDL:
     """Retry yt-dlp through the proxy after HTTP or network failures."""
 
-    _route_cache = {}
-
     def __init__(self, options):
         self.options = options
 
@@ -67,10 +68,10 @@ class ProxyRetryYoutubeDL:
                 return getattr(ydl, method)(*args, **kwargs)
 
         url = args[0] if args and isinstance(args[0], str) else kwargs.get('url')
-        cached_route = self._route_cache.get(url) if url else None
-        route_known = url in self._route_cache if url else False
+        if url and url.startswith(('http://', 'https://')):
+            validate_external_url(url)
 
-        if method == 'extract_info' and url and DOWNLOAD_PROXY and not route_known:
+        if method == 'extract_info' and url and DOWNLOAD_PROXY:
             executor = ThreadPoolExecutor(max_workers=2)
             futures = {
                 executor.submit(attempt, route): route
@@ -82,7 +83,6 @@ class ProxyRetryYoutubeDL:
                     route = futures[future]
                     try:
                         result = future.result()
-                        self._route_cache[url] = route
                         print(f'yt-dlp selected {"proxy" if route else "direct"} route for {url}')
                         return result
                     except Exception as error:
@@ -90,15 +90,6 @@ class ProxyRetryYoutubeDL:
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
             raise last_error
-
-        if route_known:
-            try:
-                return attempt(cached_route)
-            except Exception:
-                alternate_route = DOWNLOAD_PROXY if cached_route is None else None
-                result = attempt(alternate_route)
-                self._route_cache[url] = alternate_route
-                return result
 
         try:
             return attempt()
@@ -123,6 +114,24 @@ class ProxyRetryYoutubeDL:
 
     def download(self, *args, **kwargs):
         return self._run('download', *args, **kwargs)
+
+
+def validate_external_url(url):
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        raise ValueError('Only HTTP(S) URLs with a hostname are allowed')
+    hostname = parsed.hostname.lower().rstrip('.')
+    if hostname == 'localhost' or hostname.endswith('.localhost') or hostname.endswith('.local'):
+        raise ValueError('Local hostnames are not allowed')
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, None)}
+    except socket.gaierror:
+        addresses = set()
+    for address in addresses:
+        ip = ipaddress.ip_address(address)
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+                or ip.is_reserved or ip.is_unspecified):
+            raise ValueError('Private or local network addresses are not allowed')
 
 def normalize_url(text: str):
     text = text.strip()
@@ -305,8 +314,7 @@ def make_progress_hook(msg, loop):
 
 def run_ffmpeg(command, duration, progress_hook=None):
     process = subprocess.Popen(
-        f"{command} -progress pipe:1 -nostats",
-        shell=True,
+        shlex.split(command) + ['-progress', 'pipe:1', '-nostats'],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -465,7 +473,10 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             # конвертируем thumbnail в JPG, если WEBP
             if thumb_path and thumb_path.endswith(".webp"):
                 new_thumb = thumb_path.replace(".webp", ".jpg")
-                os.system(f'ffmpeg -y -i "{thumb_path}" "{new_thumb}"')
+                subprocess.run(
+                    ['ffmpeg', '-y', '-i', thumb_path, new_thumb],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
                 os.remove(thumb_path)
                 thumb_path = new_thumb
 
@@ -492,12 +503,14 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
 
                 final_m4a = os.path.join(DOWNLOAD_DIR, f"final_{uid}.m4a")
 
-                os.system(
-                    f'ffmpeg -y -i "{m4a_path}" '
-                    f'-metadata title="{title}" '
-                    f'-metadata artist="{artist}" '
-                    f'-c:a copy '
-                    f'"{final_m4a}"'
+                subprocess.run(
+                    [
+                        'ffmpeg', '-y', '-i', m4a_path,
+                        '-metadata', f'title={title}',
+                        '-metadata', f'artist={artist}',
+                        '-c:a', 'copy', final_m4a,
+                    ],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
 
                 try: os.remove(m4a_path)
@@ -529,14 +542,13 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             if thumb_path:
                 title = safe_meta(info.get("title", ""))
                 artist = safe_meta(info.get("uploader", ""))
-                cmd = (
-                    f'ffmpeg -y -i "{audio_path}" -i "{thumb_path}" '
-                    f'-metadata title="{title}" '
-                    f'-metadata artist="{artist}" '
-                    f'-metadata:s:v title="Album cover" '
-                    f'-metadata:s:v comment="Cover (front)" '
-                    f'"{output_path}"'
-                )
+                cmd = shlex.join([
+                    'ffmpeg', '-y', '-i', audio_path, '-i', thumb_path,
+                    '-metadata', f'title={title}',
+                    '-metadata', f'artist={artist}',
+                    '-metadata:s:v', 'title=Album cover',
+                    '-metadata:s:v', 'comment=Cover (front)', output_path,
+                ])
             else:
                 cmd = f'ffmpeg -y -i "{audio_path}" -c:a libmp3lame -b:a 192k "{output_path}"'
 
@@ -609,15 +621,17 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                     ydl_direct.download([url])
 
                 if direct_ext == 'mp4':
-                    os.system(
-                        f'ffmpeg -y -i "{direct_path}" -c copy '
-                        f'-movflags +faststart "{output_path}"'
+                    subprocess.run(
+                        ['ffmpeg', '-y', '-i', direct_path, '-c', 'copy',
+                         '-movflags', '+faststart', output_path],
+                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
                 else:
-                    os.system(
-                        f'ffmpeg -y -i "{direct_path}" -c:v libx264 '
-                        f'-vf scale=-2:480 -preset ultrafast -crf 32 '
-                        f'-c:a aac -movflags +faststart "{output_path}"'
+                    subprocess.run(
+                        ['ffmpeg', '-y', '-i', direct_path, '-c:v', 'libx264',
+                         '-vf', 'scale=-2:480', '-preset', 'ultrafast', '-crf', '32',
+                         '-c:a', 'aac', '-movflags', '+faststart', output_path],
+                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
 
                 try: os.remove(direct_path)
@@ -857,16 +871,19 @@ async def search_youtube(query: str):
     info = await loop.run_in_executor(None, _search)
     return info.get('entries', [])[:8] if info and info.get('entries') else []
 
-# Глобальный словарь для хранения URL по ID (в реальном боте лучше использовать БД или кеш)
-url_cache = {}
-
-def make_format_keyboard(url, include_audio=True, include_video=True):
-    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+def store_callback_url(context, url):
+    links = context.user_data.setdefault('media_links', {})
+    if len(links) >= 32:
+        links.pop(next(iter(links)))
     import hashlib
-
-    # Создаём короткий ID из URL
     url_id = hashlib.md5(url.encode()).hexdigest()[:8]
-    url_cache[url_id] = url
+    links[url_id] = url
+    return url_id
+
+def make_format_keyboard(url, context, include_audio=True, include_video=True):
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+    url_id = store_callback_url(context, url)
 
     buttons = []
     if include_audio:
@@ -877,7 +894,7 @@ def make_format_keyboard(url, include_audio=True, include_video=True):
     keyboard = InlineKeyboardMarkup([buttons])
     return keyboard
 
-async def make_results_keyboard(results):
+async def make_results_keyboard(results, context):
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     import hashlib
 
@@ -896,8 +913,7 @@ async def make_results_keyboard(results):
             continue
 
         url = f"https://www.youtube.com/watch?v={video_id}"
-        url_id = hashlib.md5(url.encode()).hexdigest()[:8]
-        url_cache[url_id] = url
+        url_id = store_callback_url(context, url)
         has_audio, has_video = media_types[type_index]
         type_index += 1
         row = []
@@ -946,7 +962,7 @@ async def process_message(update, context):
             format_choice = "mp3" if has_audio else "mp4"
             await download_and_send(context, update.message, url, format_choice, msg=msg)
             return
-        keyboard = make_format_keyboard(url, include_audio=has_audio, include_video=has_video)
+        keyboard = make_format_keyboard(url, context, include_audio=has_audio, include_video=has_video)
         # Проверяем тип клавиатуры
         from telegram import InlineKeyboardMarkup
         if not isinstance(keyboard, InlineKeyboardMarkup):
@@ -963,7 +979,7 @@ async def process_message(update, context):
         await edit_text_retry(msg, "Nothing found.")
         return
 
-    keyboard = await make_results_keyboard(results)
+    keyboard = await make_results_keyboard(results, context)
     lines = ["🔎 Found tracks:"]
     for index, info in enumerate(results, start=1):
         title = (info.get('title') or 'Untitled').strip()
@@ -977,16 +993,17 @@ async def callback(update, context):
     await query.answer()
 
     data = query.data.split('|')
+    links = context.user_data.get('media_links', {})
     if data[0] == "pick":
-        if len(data) != 2 or not url_cache.get(data[1]):
+        if len(data) != 2 or not links.get(data[1]):
             await telegram_retry(lambda: query.message.reply_text("The link has expired or is invalid."))
             return
 
-        has_audio, has_video = await url_media_types(url_cache[data[1]])
+        has_audio, has_video = await url_media_types(links[data[1]])
         if not has_audio and not has_video:
             has_audio = has_video = True
         keyboard = make_format_keyboard(
-            url_cache[data[1]],
+            links[data[1]], context,
             include_audio=has_audio,
             include_video=has_video,
         )
@@ -999,7 +1016,7 @@ async def callback(update, context):
     url_id = data[1]
     format_choice = data[2]
 
-    url = url_cache.get(url_id)
+    url = links.get(url_id)
 
     if not url:
         await telegram_retry(lambda: query.message.reply_text("The link has expired or is invalid."))
