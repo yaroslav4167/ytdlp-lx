@@ -24,6 +24,6 @@
     <text x="644" y="368" font-size="30" fill="#c8e7f7">Simple downloader</text>
     <rect x="644" y="410" width="170" height="6" rx="3" fill="#65d0ff"/>
     <text x="644" y="456" font-size="20" fill="#9bc8df">Audio &amp; video from Spotify, TikTok, Instagram,</text>
-    <text x="644" y="488" font-size="20" fill="#9bc8df">YouTube and other links.</text>
+    <text x="644" y="488" font-size="20" fill="#9bc8df">YouTube and other links, or just a track name.</text>
   </g>
 </svg>
