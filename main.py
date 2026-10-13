@@ -163,6 +163,21 @@ def is_tiktok_photo_url(url: str) -> bool:
         and bool(re.match(r'^/@[^/]+/photo/\d+/?$', parsed.path, re.IGNORECASE))
     )
 
+async def resolve_tiktok_short_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.netloc.lower().rstrip('.').lower() != 'vt.tiktok.com':
+        return url
+    try:
+        timeout = aiohttp.ClientTimeout(total=15, connect=10, sock_read=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, allow_redirects=True) as response:
+                final_url = str(response.url)
+        validate_external_url(final_url)
+        return final_url
+    except Exception as error:
+        print(f'TikTok short URL resolution error: {error}')
+        return url
+
 def is_spotify_url(url: str) -> bool:
     return urlparse(url).netloc.lower().endswith('spotify.com')
 
@@ -1073,6 +1088,7 @@ async def process_message(update, context):
 
     url = normalize_url(query)
     if url:
+        url = await resolve_tiktok_short_url(url)
         if is_tiktok_photo_url(url):
             await download_and_send_tiktok_photos(context, update.message, url, msg=msg)
             return
