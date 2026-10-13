@@ -163,6 +163,13 @@ def is_tiktok_photo_url(url: str) -> bool:
         and bool(re.match(r'^/@[^/]+/photo/\d+/?$', parsed.path, re.IGNORECASE))
     )
 
+def is_instagram_photo_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.netloc.lower().endswith('instagram.com')
+        and bool(re.match(r'^/p/[A-Za-z0-9_-]+/?$', parsed.path, re.IGNORECASE))
+    )
+
 async def resolve_tiktok_short_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.netloc.lower().rstrip('.').lower() != 'vt.tiktok.com':
@@ -453,6 +460,36 @@ async def download_tiktok_photos(url: str):
         'title': data.get('title') or 'TikTok photo',
         'uploader': (data.get('author') or {}).get('unique_id', ''),
     }
+
+async def download_instagram_photo(url: str):
+    """Download the public preview image from an Instagram photo post."""
+    timeout = aiohttp.ClientTimeout(total=60, connect=15, sock_read=45)
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            page = await response.text()
+
+        match = re.search(
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+            page,
+            re.IGNORECASE,
+        )
+        if not match:
+            raise Exception('Instagram did not return a public photo')
+
+        image_url = html.unescape(match.group(1))
+        validate_external_url(image_url)
+        async with session.get(image_url) as image_response:
+            image_response.raise_for_status()
+            path = os.path.join(DOWNLOAD_DIR, f'photo_{uuid.uuid4().hex}.jpg')
+            with open(path, 'wb') as image_file:
+                image_file.write(await image_response.read())
+
+    if downloaded_size(path) > MAX_UPLOAD_SIZE:
+        os.remove(path)
+        raise Exception('The Instagram photo exceeds the 50 MB limit')
+    return [path], {'title': 'Instagram photo', 'uploader': ''}
 
 async def url_is_playlist(url: str) -> bool:
     """True, если ссылка ведёт на плейлист (несколько роликов)."""
@@ -997,6 +1034,41 @@ async def download_and_send_tiktok_photos(context, source_message, url, msg=None
         except Exception:
             pass
 
+async def download_and_send_instagram_photo(context, source_message, url, msg=None):
+    cleanup_stale_downloads()
+    chat_id = source_message.chat_id
+    InputFile = get_telegram_components()['InputFile']
+    if msg is None:
+        msg = await telegram_retry(
+            lambda: context.bot.send_message(chat_id=chat_id, text="⬇️ Downloading photo..."))
+
+    try:
+        files, info = await download_instagram_photo(url)
+        await edit_text_retry(msg, "📤 Sending photo...")
+        path = files[0]
+
+        def send_photo():
+            with open(path, 'rb') as stream:
+                photo = InputFile(stream, filename=safe_download_filename(info, 'jpg'))
+                return context.bot.send_photo(chat_id=chat_id, photo=photo)
+
+        await telegram_retry(send_photo)
+    except Exception as error:
+        await edit_text_retry(msg, f"Photo download error: {error}")
+        return
+    finally:
+        for path in locals().get('files', []):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        cleanup_stale_downloads()
+
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
 async def search_youtube(query: str):
     yt_dlp = get_yt_dlp()
     loop = asyncio.get_running_loop()
@@ -1091,6 +1163,9 @@ async def process_message(update, context):
         url = await resolve_tiktok_short_url(url)
         if is_tiktok_photo_url(url):
             await download_and_send_tiktok_photos(context, update.message, url, msg=msg)
+            return
+        if is_instagram_photo_url(url):
+            await download_and_send_instagram_photo(context, update.message, url, msg=msg)
             return
         if is_spotify_url(url):
             spotify_url, spotify_error = await spotify_to_youtube(url)
