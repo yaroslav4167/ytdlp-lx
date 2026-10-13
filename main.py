@@ -156,6 +156,13 @@ def normalize_url(text: str):
         return f"https://www.tiktok.com/@_/video/{tiktok_mobile.group(1)}"
     return text
 
+def is_tiktok_photo_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.netloc.lower().endswith('tiktok.com')
+        and bool(re.match(r'^/@[^/]+/photo/\d+/?$', parsed.path, re.IGNORECASE))
+    )
+
 def is_spotify_url(url: str) -> bool:
     return urlparse(url).netloc.lower().endswith('spotify.com')
 
@@ -240,6 +247,7 @@ def get_telegram_components():
     import telegram
     from telegram import InputFile, InlineKeyboardMarkup, InlineKeyboardButton
     from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+    from telegram.request import HTTPXRequest
     return {
         'telegram': telegram,
         'InputFile': InputFile,
@@ -250,6 +258,7 @@ def get_telegram_components():
         'MessageHandler': MessageHandler,
         'CallbackQueryHandler': CallbackQueryHandler,
         'filters': filters,
+        'HTTPXRequest': HTTPXRequest,
     }
 
 def make_progress_hook(msg, loop):
@@ -385,6 +394,50 @@ async def telegram_retry(operation):
             if delay == 8:
                 print(f"Telegram request error after retries: {error}")
     raise last_error
+
+async def download_tiktok_photos(url: str):
+    """Resolve a TikTok photo post and download its images through TikWM."""
+    import mimetypes
+
+    api_url = 'https://www.tikwm.com/api/'
+    timeout = aiohttp.ClientTimeout(total=60, connect=15, sock_read=45)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(api_url, params={'url': url}) as response:
+            response.raise_for_status()
+            payload = await response.json(content_type=None)
+
+        data = payload.get('data') or {}
+        image_urls = data.get('images') or []
+        if payload.get('code') != 0 or not image_urls:
+            raise Exception('TikTok photo post did not return any images')
+
+        uid = uuid.uuid4().hex
+        files = []
+        try:
+            for index, image_url in enumerate(image_urls, start=1):
+                validate_external_url(image_url)
+                async with session.get(image_url) as image_response:
+                    image_response.raise_for_status()
+                    content_type = image_response.headers.get('Content-Type', '').split(';', 1)[0]
+                    extension = mimetypes.guess_extension(content_type) or '.jpg'
+                    path = os.path.join(DOWNLOAD_DIR, f'photo_{uid}_{index}{extension}')
+                    with open(path, 'wb') as image_file:
+                        image_file.write(await image_response.read())
+                if downloaded_size(path) > MAX_UPLOAD_SIZE:
+                    raise Exception('A TikTok photo exceeds the 50 MB limit')
+                files.append(path)
+        except Exception:
+            for path in files:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            raise
+
+    return files, {
+        'title': data.get('title') or 'TikTok photo',
+        'uploader': (data.get('author') or {}).get('unique_id', ''),
+    }
 
 async def url_is_playlist(url: str) -> bool:
     """True, если ссылка ведёт на плейлист (несколько роликов)."""
@@ -886,6 +939,49 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
     except Exception:
         pass
 
+async def download_and_send_tiktok_photos(context, source_message, url, msg=None):
+    cleanup_stale_downloads()
+    chat_id = source_message.chat_id
+    InputFile = get_telegram_components()['InputFile']
+    if msg is None:
+        msg = await telegram_retry(
+            lambda: context.bot.send_message(chat_id=chat_id, text="⬇️ Downloading photos..."))
+
+    try:
+        files, info = await download_tiktok_photos(url)
+    except Exception as error:
+        await edit_text_retry(msg, f"Photo download error: {error}")
+        return
+
+    await edit_text_retry(msg, f"📤 Sending {len(files)} photo(s)...")
+    sent = False
+    try:
+        for path in files:
+            def send_photo():
+                with open(path, 'rb') as stream:
+                    photo = InputFile(stream, filename=safe_download_filename(info, 'jpg'))
+                    return context.bot.send_photo(chat_id=chat_id, photo=photo)
+
+            await telegram_retry(send_photo)
+            sent = True
+    except Exception as error:
+        print(f"Photo sending error: {error}")
+        await telegram_retry(lambda: context.bot.send_message(
+            chat_id=chat_id, text=f"Photo sending error.\n{error}"))
+    finally:
+        for path in files:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        cleanup_stale_downloads()
+
+    if sent:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
 async def search_youtube(query: str):
     yt_dlp = get_yt_dlp()
     loop = asyncio.get_running_loop()
@@ -977,6 +1073,9 @@ async def process_message(update, context):
 
     url = normalize_url(query)
     if url:
+        if is_tiktok_photo_url(url):
+            await download_and_send_tiktok_photos(context, update.message, url, msg=msg)
+            return
         if is_spotify_url(url):
             spotify_url, spotify_error = await spotify_to_youtube(url)
             if not spotify_url:
@@ -1072,8 +1171,32 @@ def build_app():
     MessageHandler = comps['MessageHandler']
     CallbackQueryHandler = comps['CallbackQueryHandler']
     filters = comps['filters']
+    HTTPXRequest = comps['HTTPXRequest']
 
-    app = ApplicationBuilder().token(BOT_TOKEN).concurrent_updates(True).build()
+    request = HTTPXRequest(
+        connection_pool_size=20,
+        connect_timeout=20,
+        read_timeout=45,
+        write_timeout=90,
+        pool_timeout=20,
+        http_version='1.1',
+    )
+    get_updates_request = HTTPXRequest(
+        connection_pool_size=4,
+        connect_timeout=20,
+        read_timeout=75,
+        write_timeout=30,
+        pool_timeout=20,
+        http_version='1.1',
+    )
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .get_updates_request(get_updates_request)
+        .concurrent_updates(True)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
