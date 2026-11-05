@@ -11,6 +11,7 @@ import ipaddress
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
+from yandex_music import is_yandex_music_url, yandex_to_youtube
 
 # Runtime configuration. Secrets are supplied through the environment.
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -1166,6 +1167,13 @@ async def process_message(update, context):
             return
         if is_instagram_photo_url(url):
             await download_and_send_instagram_photo(context, update.message, url, msg=msg)
+            return
+        if is_yandex_music_url(url):
+            youtube_url, error = await yandex_to_youtube(url, search_youtube)
+            if not youtube_url:
+                await edit_text_retry(msg, error)
+                return
+            await download_and_send(context, update.message, youtube_url, "mp3", msg=msg)
             return
         if is_spotify_url(url):
             spotify_url, spotify_error = await spotify_to_youtube(url)

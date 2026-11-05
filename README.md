@@ -8,13 +8,21 @@ Telegram bot for downloading media and audio from supported `yt-dlp` sites. It s
 
 ## Features
 
-- Instagram, TikTok, Coub, YouTube, Spotify lookup, and other `yt-dlp` extractors.
+- Instagram, TikTok, Coub, YouTube, Spotify/Yandex Music lookup, and other `yt-dlp` extractors.
 - Separate audio/video streams are merged with FFmpeg.
 - Coub video is looped until its full audio track ends.
 - Output is kept under Telegram's 50 MiB bot upload limit where possible.
 - Direct and SOCKS5-proxy extraction race for metadata; the successful route is reused for the download.
 - Telegram send/edit operations retry after transient network errors.
 - Playlists are rejected; only single media items are processed.
+
+## Yandex Music links
+
+Send a single-track link such as `https://music.yandex.ru/album/44620083/track/157450762`
+or `https://music.yandex.ru/track/157450762`. No Yandex account or token is required.
+The bot reads the public track title and artists, searches YouTube, and sends audio
+from the first result as MP3, just like Spotify lookup. The recording may differ
+from the Yandex version. Albums and playlists are not supported.
 
 ## Requirements
 
@@ -90,6 +98,7 @@ The smoke test checks downloads, valid audio/video streams, Telegram retry behav
 
 ```bash
 .venv/bin/python test_ytdlp_smoke.py
+.venv/bin/python -m unittest -v test_yandex_music
 ```
 
 TikTok may be skipped when the test server IP is blocked by TikTok. This is an upstream access restriction, not a test failure in the bot.
