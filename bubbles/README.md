@@ -74,8 +74,8 @@ Covers are fetched and pushed in a background application task after the results
 
 ## Long recording titles
 
-All search titles wrap across lines; none scroll or get shortened to fit the shared payload. Selecting a row updates classes and format buttons in place, without rebuilding rows or reloading artwork. No title-lookup request is needed.
+Search always keeps all eight results in one widget. Titles wrap across lines; selection changes only highlighting and format buttons, preserving DOM nodes and artwork. No marquee or additional result messages are used.
 
-When full titles exceed the 1024-byte state budget or estimated widget height, results are split into consecutive cards with range labels. Short eight-result lists stay together. Every row keeps its original recording title; only secondary artist labels may shrink for an unusually large single title. Each card has local selection and the existing per-user download guard.
+The initial state stays within 1024 bytes. If full names cannot fit, the private-chat widget fetches the remaining names in bounded background replies (at least 5.2 seconds apart) and changes title text in place. Download taps wait for a pending background reply. A small font adjustment keeps long lists within the widget height where practical. The authoritative full titles remain in the owned server registry.
 
 After editing `widget.js`, run `python -m bubbles.build` (Node/npm required locally). It uses Terser 5.51.2 to produce `widget.min.js` and `widget.build.json`; deploy those with the source. Inline HTML handler names are preserved. The server needs no npm runtime: it uses the compact file only when source and output hashes match. HTML/CSS/localization edits do not require rebuilding JavaScript.
