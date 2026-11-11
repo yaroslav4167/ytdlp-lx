@@ -223,6 +223,10 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_processing_selection_and_download_share_one_message(self):
         loader = await self.service.send_loading(self.context, self.source)
+        initial = self.bot.do_api_request.await_args.kwargs['api_kwargs']
+        self.assertEqual(json.loads(initial['chat_data'])['view'], 'processing')
+        self.assertIn('class="spinner"', initial['html'])
+        self.assertIn('@keyframes spin', initial['html'])
         card = await main.try_bubble(self.context, self.source, loader, self.items[:1], 'Track')
         self.assertEqual(card.message_id, loader.message_id)
         self.assertEqual(card.state['view'], 'format')
