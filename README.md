@@ -119,3 +119,9 @@ Designs are editable in `bubbles/designs/default/`; translations are in
 `bubbles/locales/`. New cards read templates from disk without restarting.
 See [the editing and deployment guide](bubbles/README.md) for limits, fallback
 behavior, and the 10-minute retry window for files whose delivery failed.
+
+Widget mode has no extra caption or native inline keyboard. A URL offers direct
+“Download audio” / “Download video” actions. Real mini-covers are embedded from
+media metadata; after sending, the card becomes a recording summary. Unconfirmed
+media-upload outcomes are not automatically retried, preventing timeout-driven
+duplicate files; the card asks the user to check the chat before a manual resend.

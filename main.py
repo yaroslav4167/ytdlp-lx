@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from yandex_music import is_yandex_music_url, yandex_to_youtube
 from bubbles import BubbleService, RETAINED_FILES
+from bubbles.delivery import AmbiguousDelivery, send_media
 from bubbles.service import item as bubble_item, strings as bubble_strings, user_language
 
 # Runtime configuration. Secrets are supplied through the environment.
@@ -947,7 +948,7 @@ async def send_media_file(context, chat_id, filename, info):
                 return await context.bot.send_document(chat_id=chat_id, document=file)
             return await context.bot.send_video(chat_id=chat_id, video=file)
 
-    return await telegram_retry(send_file)
+    return await send_media(send_file)
 
 
 async def download_and_send(context, source_message, url, format_choice, msg=None, delete_source=False):
@@ -1006,9 +1007,7 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
         return
 
     if getattr(msg, 'is_bubble', False):
-        if info.get('title'):
-            from bubbles.service import shorten
-            msg.state['title'] = shorten(info['title'], 160)
+        msg.media_ready(filename, info)
     await edit_text_retry(msg, words["sending_plain"])
     sent = False
 
@@ -1020,10 +1019,10 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
     except Exception as e:
         print(f"File sending error: {e}")
         if getattr(msg, 'is_bubble', False):
-            await msg.send_failed(filename, info)
+            await msg.send_failed(filename, info, kind='uncertain' if isinstance(e, AmbiguousDelivery) else 'send')
             return
         await telegram_retry(lambda: context.bot.send_message(
-            chat_id=chat_id, text=words["sending_failed"]))
+            chat_id=chat_id, text=words["problems"]["uncertain"][3] if isinstance(e, AmbiguousDelivery) else words["sending_failed"]))
 
     try:
         os.remove(filename)

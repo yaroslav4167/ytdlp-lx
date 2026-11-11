@@ -55,7 +55,110 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(len(source.encode()),32768)
             self.assertLessEqual(len(zlib.compress(source.encode(),9)),4096)
             self.assertNotIn('__I18N__',source)
-            self.assertIn(strings(code)['problems']['send'][2],source)
+            self.assertIn(strings(code)['download_audio'],source)
+
+    async def test_caption_and_native_keyboard_are_absent(self):
+        entry = await self.card()
+        payload = self.bot.do_api_request.await_args.kwargs['api_kwargs']
+        self.assertNotIn('caption', payload)
+        self.assertNotIn('reply_markup', payload)
+        self.assertEqual(json.loads(payload['public_data']), {})
+        await entry.error('source')
+        self.bot.edit_message_caption.assert_not_awaited()
+        self.assertEqual(entry.state['problem'], strings('ru')['problems']['source'])
+        self.assertLessEqual(len(state_json(entry.state).encode()), 1024)
+
+    async def test_acknowledgement_failure_does_not_cancel_download(self):
+        await self.card()
+        answer = AsyncMock(side_effect=asyncio.TimeoutError())
+        await self.service.dispatch(self.context,123,{'id':123,'type':'private'},42,'dl|0|mp3',answer)
+        await asyncio.gather(*self.tasks)
+        self.download.assert_awaited_once()
+        self.assertFalse(self.service.busy_users)
+
+    async def test_hung_acknowledgement_is_bounded(self):
+        await self.card()
+        async def hung(_):
+            await asyncio.Event().wait()
+        with patch('bubbles.service.ACK_TIMEOUT', 0.01):
+            await self.service.dispatch(self.context,123,{'id':123,'type':'private'},42,'dl|0|mp3',hung)
+        await asyncio.gather(*self.tasks)
+        self.download.assert_awaited_once()
+
+    async def test_thumbnail_public_state_has_a_separate_budget(self):
+        from PIL import Image
+        from bubbles.thumbnails import encode_image
+        import io
+        image = Image.new('RGB', (160,90), (20,100,200))
+        buffer = io.BytesIO();image.save(buffer,format='PNG')
+        cover = encode_image(buffer.getvalue())
+        self.assertTrue(cover.startswith('data:image/webp;base64,'))
+        entry = await self.card('search')
+        entry.covers = {i:cover for i in range(8)}
+        self.assertLessEqual(len(entry.cover_data().encode()),1024)
+        self.assertNotIn('thumbnail',state_json(entry.state))
+        entry.search_page(2)
+        self.assertEqual(set(json.loads(entry.cover_data())),{'6','7'})
+
+    async def test_summary_refresh_failure_does_not_become_delivery_failure(self):
+        entry=await self.card();await entry.begin(0,'mp3')
+        with patch('bubbles.service.thumbnail',AsyncMock(side_effect=RuntimeError('image unavailable'))):
+            await entry.complete()
+        self.assertEqual(entry.state['stage'],'done')
+        self.assertNotIn('error',entry.state)
+
+    async def test_ambiguous_media_delivery_is_not_retried(self):
+        from bubbles.delivery import send_media, AmbiguousDelivery
+        from telegram.error import TimedOut
+        send = AsyncMock(side_effect=TimedOut())
+        with self.assertRaises(AmbiguousDelivery):
+            await send_media(send)
+        self.assertEqual(send.await_count, 1)
+
+    async def test_definite_rate_limit_can_be_retried(self):
+        from bubbles.delivery import send_media
+        from telegram.error import RetryAfter
+        send = AsyncMock(side_effect=[RetryAfter(0), 'sent'])
+        self.assertEqual(await send_media(send), 'sent')
+        self.assertEqual(send.await_count, 2)
+
+    async def test_uncertain_resend_warns_instead_of_uploading_again(self):
+        from bubbles.delivery import AmbiguousDelivery
+        entry = await self.card();await entry.begin(0, 'mp3')
+        with tempfile.NamedTemporaryFile(suffix='.mp3',delete=False) as file:
+            file.write(b'audio'); filename=file.name
+        await entry.send_failed(filename, {'title':'Track'}, kind='uncertain')
+        self.assertEqual(entry.state['error'], 'uncertain')
+        self.send.side_effect=AmbiguousDelivery('unknown result')
+        await self.dispatch('resend');await asyncio.gather(*self.tasks)
+        self.assertEqual(entry.state['error'], 'uncertain')
+        self.assertEqual(self.send.await_count,1)
+        self.assertTrue(Path(filename).exists())
+
+    async def test_completed_card_has_actual_metadata_and_no_download_actions(self):
+        entry = await self.card()
+        await entry.begin(0, 'mp3')
+        with tempfile.NamedTemporaryFile(suffix='.m4a') as file:
+            file.write(b'audio');file.flush()
+            entry.media_ready(file.name, {'title':'Actual title','uploader':'Artist','duration':245})
+            await entry.complete()
+        self.assertEqual(entry.state['stage'], 'done')
+        self.assertEqual(entry.state['title'], 'Actual title')
+        self.assertEqual(entry.state['artist'], 'Artist')
+        self.assertEqual(entry.state['duration'], '4:05')
+        self.assertEqual(entry.state['format'], 'm4a')
+        self.assertIn('MiB', entry.state['size'])
+        await self.dispatch('dl|0|mp3')
+        self.download.assert_not_awaited()
+        self.bot.edit_message_caption.assert_not_awaited()
+
+    def test_thumbnails_reject_private_and_unsupported_urls(self):
+        from bubbles.thumbnails import validate_image_url
+        for url in ('http://example.com/x','https://127.0.0.1/x','https://[::1]/x',
+                    'https://user:password@example.com/x','https://localhost/x',
+                    'https://169.254.169.254/x','https://example.com:8443/x'):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                validate_image_url(url)
 
     async def test_private_chats_and_plain_opt_out(self):
         self.source.chat.type='supergroup'

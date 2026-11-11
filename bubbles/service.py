@@ -4,6 +4,8 @@ No design markup lives here. Templates and locales are read for every new card.
 """
 import asyncio
 from collections import OrderedDict
+from .thumbnails import thumbnail
+from .delivery import AmbiguousDelivery
 import json
 import logging
 import math
@@ -19,6 +21,7 @@ RETAINED_FILES = set()
 CARD_TTL = 1800
 FILE_TTL = 600
 MAX_CARDS = 512
+ACK_TIMEOUT = 4
 
 
 def locale(language=None):
@@ -78,7 +81,11 @@ def duration(value):
 
 def item(url, info=None, audio=True, video=True):
     info = info or {}
-    return dict(url=url, title=shorten(info.get('title'), 160),
+    thumbnails = info.get('thumbnails') or []
+    cover = info.get('thumbnail') or (thumbnails[-1].get('url') if thumbnails else '')
+    if not cover and re.fullmatch(r'[A-Za-z0-9_-]{11}', str(info.get('id') or '')) and 'youtube.com/' in url:
+        cover = f"https://i.ytimg.com/vi/{info['id']}/default.jpg"
+    return dict(url=url, thumbnail=cover, title=shorten(info.get('title'), 160),
                 artist=shorten(info.get('uploader') or info.get('artist'), 80),
                 duration=duration(info.get('duration')), audio=audio, video=video)
 
@@ -97,7 +104,7 @@ class Bubble:
             self.state.update(page=0, total=len(items))
             self.search_page(0)
         elif items:
-            self.state.update({k: v for k, v in items[0].items() if k != 'url'})
+            self.state.update({k: v for k, v in items[0].items() if k in ('title', 'artist', 'duration', 'audio', 'video')})
             self.state['title'] = items[0]['title'] or shorten(title, 120) or self.words['recording']
         self.created = time.monotonic()
         self.filename = None
@@ -108,6 +115,9 @@ class Bubble:
         self.last_progress = 0
         self.lock = asyncio.Lock()
         self.published = None
+        self.covers = {}
+        self.summary = {}
+        self.published_covers = None
 
     def search_page(self, page):
         self.state['page'] = page
@@ -116,65 +126,49 @@ class Bubble:
                                   audio=v['audio'], video=v['video'])
                               for i, v in enumerate(self.items) if page*3 <= i < page*3+3]
 
-    def caption(self):
-        if self.state.get('error'):
-            return self.words['problems'][self.state['error']][2] + '\n' + self.words['problems'][self.state['error']][3]
-        key = 'caption_' + (self.state.get('stage', 'downloading') if self.state['view'] == 'progress'
-                            else self.state['view'])
-        return self.state.get('title', '') + '\n' + self.words[key].format(total=len(self.items))
+    def cover_indices(self):
+        if self.state['view'] == 'search':
+            return [r['i'] for r in self.state.get('rows', [])]
+        return [self.selected] if self.items else []
 
-    def keyboard(self):
-        def button(text, action):
-            return {'text': text, 'callback_data': 'bubble|' + action}
-        error = self.state.get('error')
-        if error:
-            problem = self.words['problems'][error]
-            rows = [[button(problem[4], problem[5])]]
-            if error in ('source', 'send'):
-                rows.append([button(self.words['other_link'], 'input')])
-        elif self.state['view'] == 'progress':
-            rows = []
-        else:
-            rows = []
-            indices = range(self.state.get('page', 0)*3, min(self.state.get('page', 0)*3+3, len(self.items))) if self.state['view'] == 'search' else range(min(1, len(self.items)))
-            for i in indices:
-                media = self.items[i]
-                prefix = f'{i+1}. ' if self.state['view'] == 'search' else ''
-                row = [button(prefix+self.words[label], f'dl|{i}|{fmt}') for label, fmt in [('audio','mp3'),('video','mp4')] if media[label]]
-                rows.append(row)
-            if self.state['view'] == 'search':
-                page = self.state['page']
-                nav = []
-                if page:
-                    nav.append(button('←', f'page|{page-1}'))
-                if (page+1)*3 < len(self.items):
-                    nav.append(button('→', f'page|{page+1}'))
-                if nav:
-                    rows.append(nav)
-        return {'inline_keyboard': rows}
+    async def prepare_covers(self):
+        indices = [i for i in self.cover_indices() if i not in self.covers]
+        values = await asyncio.gather(*(thumbnail(self.items[i].get('thumbnail'),
+            hero=self.state['view'] != 'search') for i in indices))
+        self.covers.update(zip(indices, values))
+
+    def cover_data(self):
+        return state_json({str(i):self.covers[i] for i in self.cover_indices() if self.covers.get(i)})
 
     async def publish(self):
         """Serialize updates so late progress cannot overwrite terminal states."""
         async with self.lock:
             serialized = state_json(self.state)
-            if serialized == self.published:
+            covers = self.cover_data()
+            if serialized == self.published and covers == self.published_covers:
                 return
             try:
                 await self.service.api(self.context.bot, 'editMessageWidgetData',
                                        chat_id=self.chat_id, message_id=self.message_id,
-                                       chat_data=serialized)
+                                       chat_data=serialized, public_data=covers)
                 self.published = serialized
-                caption = self.caption()
-                if getattr(self, 'last_caption', None) != caption:
+                self.published_covers = covers
+                # Older cards may still carry a caption/keyboard from the first rollout.
+                if not getattr(self, 'clean_chrome', False):
                     await self.context.bot.edit_message_caption(chat_id=self.chat_id,
-                        message_id=self.message_id, caption=caption, reply_markup=self.keyboard())
-                    self.last_caption = caption
+                        message_id=self.message_id, caption='', reply_markup={'inline_keyboard': []},
+                        connect_timeout=3, read_timeout=4, write_timeout=4, pool_timeout=1)
+                    self.clean_chrome = True
             except Exception as error:
                 if 'message is not modified' not in str(error).lower():
                     LOG.warning('Widget update failed (%s)', type(error).__name__)
 
+    def problem_state(self, kind):
+        self.state = {'view':self.state['view'], 'title':self.state.get('title', ''),
+                      'error':kind, 'problem':self.words['problems'][kind]}
+
     async def error(self, kind):
-        self.state['error'] = kind
+        self.problem_state(kind)
         await self.publish()
 
     async def begin(self, index, fmt):
@@ -183,7 +177,7 @@ class Bubble:
         media = self.items[index]
         self.state = {'view': 'progress', 'title': media['title'] or self.words['recording'],
                       'artist': media['artist'], 'duration': media['duration'],
-                      'format': fmt, 'stage': 'downloading', 'percent': 0}
+                      'format': fmt, 'stage': 'downloading', 'percent': 0, 'cover_index':index}
         self.last_progress = 0
         await self.publish()
 
@@ -240,7 +234,8 @@ class Bubble:
         self.filename = None
         self.info = {}
 
-    async def send_failed(self, filename, info):
+    async def send_failed(self, filename, info, kind='send'):
+        self.media_ready(filename, info)
         self.filename = filename
         self.info = {key: info.get(key) for key in ('title', 'uploader')}
         self.created = time.monotonic()
@@ -249,20 +244,42 @@ class Bubble:
         if self.file_timer:
             self.file_timer.cancel()
         self.file_timer = asyncio.get_running_loop().call_later(FILE_TTL, self.expire_file)
-        await self.error('send')
+        await self.error(kind)
 
     def expire_file(self):
         if self.busy:
             self.file_timer = asyncio.get_running_loop().call_later(30, self.expire_file)
             return
         self.forget_file(remove=True)
-        self.state['error'] = 'expired'
+        self.problem_state('expired')
+
+    def media_ready(self, filename, info):
+        media = self.items[self.selected]
+        updated = item(media['url'], info, media['audio'], media['video'])
+        self.items[self.selected] = {key:updated.get(key) or value for key,value in media.items()}
+        self.summary = {
+            'title':updated['title'] or media['title'] or self.words['recording'],
+            'artist':updated['artist'] or media['artist'],
+            'duration':updated['duration'] or media['duration'],
+            'format':Path(filename).suffix.lstrip('.'),
+            'size':f'{Path(filename).stat().st_size/1048576:.1f} MiB',
+        }
+        self.state.update(self.summary)
 
     async def complete(self):
         self.forget_file()
-        self.state.pop('error', None)
-        self.state.update(stage='done', percent=100, eta='', speed='')
-        await self.publish()
+        self.state = dict(view='progress',stage='done',percent=100,cover_index=self.selected,
+                          **(self.summary or {k:v for k,v in self.state.items()
+                             if k in ('title','artist','duration','format','size')}))
+        try:
+            await self.publish()
+            # Upgrade artwork only after delivery; failure must never suggest resending a delivered file.
+            cover = await thumbnail(self.items[self.selected].get('thumbnail'), hero=True)
+            if cover:
+                self.covers[self.selected] = cover
+                await self.publish()
+        except Exception as exception:
+            LOG.warning('Summary refresh failed; file already delivered (%s)', type(exception).__name__)
 
 
 class BubbleService:
@@ -273,7 +290,8 @@ class BubbleService:
 
     @staticmethod
     async def api(bot, method, **kwargs):
-        return await bot.do_api_request(endpoint=method, api_kwargs=kwargs)
+        return await asyncio.wait_for(bot.do_api_request(endpoint=method, api_kwargs=kwargs,
+            connect_timeout=3, read_timeout=4, write_timeout=4, pool_timeout=1), timeout=6)
 
     def enabled(self, source, context):
         default = os.environ.get('BUBBLES_ENABLED', '1').lower() not in ('0', 'false', 'off')
@@ -299,17 +317,19 @@ class BubbleService:
         language = user_language(source.from_user, context.user_data)
         entry = Bubble(self, context, source, language, items, title, view)
         if error:
-            entry.state['error'] = error
+            entry.problem_state(error)
         try:
+            await entry.prepare_covers()
             payload = dict(chat_id=source.chat_id, html=load_design(language),
-                           chat_data=state_json(entry.state), caption=entry.caption(),
-                           allow_queries=True, reply_markup=entry.keyboard())
+                           chat_data=state_json(entry.state),
+                           allow_queries=True, public_data=entry.cover_data())
             if getattr(source, 'message_thread_id', None):
                 payload['message_thread_id'] = source.message_thread_id
             result = await self.api(context.bot, 'sendWidget', **payload)
             entry.message_id = result['message_id']
             entry.published = payload['chat_data']
-            entry.last_caption = payload['caption']
+            entry.published_covers = payload['public_data']
+            entry.clean_chrome = True
         except Exception as exception:
             LOG.warning('Widget unavailable; using plain UI (%s)', type(exception).__name__)
             return None
@@ -322,7 +342,9 @@ class BubbleService:
         if not query:
             return
         async def answer(text):
-            await self.api(context.bot, 'answerWidgetQuery', widget_query_id=query['id'], data=text)
+            await context.bot.do_api_request(endpoint='answerWidgetQuery',
+                api_kwargs={'widget_query_id': query['id'], 'data': text},
+                connect_timeout=3, read_timeout=3, write_timeout=3, pool_timeout=1)
         await self.dispatch(context, query.get('from', {}).get('id'), query.get('chat', {}),
                             query.get('message_id'), query.get('data', ''), answer, query.get('from', {}).get('language_code'))
 
@@ -334,6 +356,12 @@ class BubbleService:
                             query.message.message_id, query.data.removeprefix('bubble|'), answer, query.from_user.language_code)
 
     async def dispatch(self, context, owner, chat, message_id, data, answer, language=None):
+        transport_answer = answer
+        async def answer(text):
+            try:
+                await asyncio.wait_for(transport_answer(text), timeout=ACK_TIMEOUT)
+            except Exception as exception:
+                LOG.warning('Widget acknowledgement failed; validated action will continue (%s)', type(exception).__name__)
         words = strings(language)
         if chat.get('type') != 'private' or owner != chat.get('id') or not message_id:
             await answer(words['unavailable'])
@@ -355,10 +383,9 @@ class BubbleService:
             await answer(words['expired_hint'])
             try:
                 await self.api(context.bot, 'editMessageWidgetData', chat_id=owner,
-                               message_id=message_id, chat_data=state_json({'error':'expired'}))
+                               message_id=message_id, chat_data=state_json({'error':'expired','problem':words['problems']['expired']}))
                 await context.bot.edit_message_caption(chat_id=owner, message_id=message_id,
-                    caption=words['expired_hint'], reply_markup={'inline_keyboard': [[{
-                        'text':words['problems']['expired'][4], 'callback_data':'bubble|input'}]]})
+                    caption='', reply_markup={'inline_keyboard': []})
             except Exception:
                 pass
             return
@@ -371,10 +398,11 @@ class BubbleService:
                 await answer(words['unavailable']); return
             await answer('')
             entry.search_page(page)
+            await entry.prepare_covers()
             await entry.publish()
             return
         if data == 'resend':
-            if entry.state.get('error') != 'send' or not entry.filename or time.monotonic() >= entry.file_deadline or not Path(entry.filename).is_file():
+            if entry.state.get('error') not in ('send', 'uncertain') or not entry.filename or time.monotonic() >= entry.file_deadline or not Path(entry.filename).is_file():
                 entry.forget_file(remove=True)
                 await answer(words['expired_hint']); await entry.error('expired'); return
             action = 'resend'
@@ -405,8 +433,8 @@ class BubbleService:
                 await entry.edit_text('📤 Sending file...')
                 try:
                     await self.send_file(entry.context, entry.chat_id, entry.filename, entry.info)
-                except Exception:
-                    await entry.error('send')
+                except Exception as exception:
+                    await entry.error('uncertain' if isinstance(exception, AmbiguousDelivery) else 'send')
                 else:
                     filename = entry.filename
                     await entry.complete()
