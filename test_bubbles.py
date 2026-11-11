@@ -172,10 +172,13 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
             await main.process_message(update,self.context)
         self.source.reply_text.assert_not_awaited()
         calls=[c for c in self.bot.do_api_request.await_args_list if c.kwargs['endpoint']=='sendWidget']
-        self.assertEqual(len(calls),2)
-        self.assertIn('spinner',calls[0].kwargs['api_kwargs']['html'])
-        self.assertEqual(len(json.loads(calls[1].kwargs['api_kwargs']['chat_data'])['rows']),8)
-        self.bot.delete_message.assert_awaited_once()
+        self.assertEqual(len(calls),1)
+        self.assertEqual(json.loads(calls[0].kwargs['api_kwargs']['chat_data'])['stage'],'processing')
+        edit=self.bot.do_api_request.await_args.kwargs
+        self.assertEqual(edit['endpoint'],'editMessageWidgetData')
+        self.assertEqual(edit['api_kwargs']['message_id'],1)
+        self.assertEqual(len(json.loads(edit['api_kwargs']['chat_data'])['rows']),8)
+        self.bot.delete_message.assert_not_awaited()
 
     async def test_search_timeout_replaces_spinner_with_problem_card(self):
         self.sequential_widget_ids()
@@ -187,7 +190,8 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
             await main.process_message(update,self.context)
         payload=self.bot.do_api_request.await_args.kwargs['api_kwargs']
         self.assertEqual(json.loads(payload['chat_data'])['error'],'search')
-        self.bot.delete_message.assert_awaited_once()
+        self.assertEqual(payload['message_id'],1)
+        self.bot.delete_message.assert_not_awaited()
 
     async def test_direct_link_reuses_single_probe(self):
         self.sequential_widget_ids()
@@ -216,6 +220,32 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*self.tasks)
         self.assertEqual(entry.state['view'],'progress')
         self.assertEqual(json.loads(entry.cover_data()),{'0':'data:image/webp;base64,example'})
+
+    async def test_processing_selection_and_download_share_one_message(self):
+        loader = await self.service.send_loading(self.context, self.source)
+        card = await main.try_bubble(self.context, self.source, loader, self.items[:1], 'Track')
+        self.assertEqual(card.message_id, loader.message_id)
+        self.assertEqual(card.state['view'], 'format')
+        await self.dispatch('dl|0|mp3')
+        await asyncio.gather(*self.tasks)
+        self.assertEqual(card.state['view'], 'progress')
+        self.download.assert_awaited_once()
+        self.assertIs(self.download.await_args.kwargs['msg'],card)
+        sends = [c for c in self.bot.do_api_request.await_args_list if c.kwargs['endpoint']=='sendWidget']
+        self.assertEqual(len(sends),1)
+        edits = [c for c in self.bot.do_api_request.await_args_list if c.kwargs['endpoint']=='editMessageWidgetData']
+        self.assertTrue(edits)
+        self.assertTrue(all(c.kwargs['api_kwargs']['message_id']==loader.message_id for c in edits))
+        self.bot.delete_message.assert_not_awaited()
+
+    async def test_failed_processing_transition_uses_text_fallback(self):
+        loader = await self.service.send_loading(self.context, self.source)
+        self.bot.do_api_request.side_effect = RuntimeError('edit failed')
+        card = await main.try_bubble(self.context, self.source, loader, self.items[:1])
+        self.assertIsNone(card)
+        await loader.edit_text('Choose format')
+        self.bot.send_message.assert_awaited_once()
+        self.bot.delete_message.assert_awaited_once()
 
     async def test_processing_widget_falls_back_to_one_editable_text_message(self):
         loader=await self.service.send_loading(self.context,self.source)

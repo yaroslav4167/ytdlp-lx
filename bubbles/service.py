@@ -412,7 +412,11 @@ class BubbleService:
             return None
         try:
             language = user_language(source.from_user,context.user_data)
-            payload = {'chat_id':source.chat_id,'html':load_loading_design(language)}
+            words = strings(language)
+            payload = {'chat_id':source.chat_id, 'html':load_design(language),
+                       'allow_queries':True, 'chat_data':state_json({
+                           'view':'progress', 'stage':'processing', 'percent':None,
+                           'stage_title':words['processing_title'], 'title':words['waiting']})}
             if getattr(source,'message_thread_id',None):
                 payload['message_thread_id']=source.message_thread_id
             result = await self.api(context.bot,'sendWidget',**payload)
@@ -421,7 +425,7 @@ class BubbleService:
             LOG.warning('Processing widget unavailable (%s)',type(exception).__name__)
             return None
 
-    async def send(self, context, source, items, title='', view='format', error=None):
+    async def send(self, context, source, items, title='', view='format', error=None, reuse=None):
         if not self.enabled(source, context):
             return None
         self.prune()
@@ -440,8 +444,16 @@ class BubbleService:
                            allow_queries=True, public_data=entry.cover_data())
             if getattr(source, 'message_thread_id', None):
                 payload['message_thread_id'] = source.message_thread_id
-            result = await self.api(context.bot, 'sendWidget', **payload)
-            entry.message_id = result['message_id']
+            if (isinstance(reuse, ProcessingMessage) and reuse.service is self
+                    and reuse.chat_id == source.chat_id and reuse.fallback is None
+                    and not reuse.loader_deleted):
+                entry.message_id = reuse.message_id
+                await self.api(context.bot, 'editMessageWidgetData',
+                    chat_id=entry.chat_id, message_id=entry.message_id,
+                    chat_data=payload['chat_data'], public_data=payload['public_data'])
+            else:
+                result = await self.api(context.bot, 'sendWidget', **payload)
+                entry.message_id = result['message_id']
             entry.published = payload['chat_data']
             entry.published_covers = payload['public_data']
             entry.clean_chrome = True
