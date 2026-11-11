@@ -101,6 +101,14 @@
       "The service did not respond in time. Please send the query again.",
       "Try again",
       "input"
+    ],
+    "too_large": [
+      "File size",
+      "!",
+      "File is too large",
+      "The prepared file exceeds Telegram’s 50 MB limit. Choose a shorter recording.",
+      "Choose another recording",
+      "input"
     ]
   },
   "processing": "⏳ Processing...",
@@ -135,5 +143,6 @@
     "finished": "Download complete",
     "convert": "Preparing the file for Telegram…",
     "sending": "Uploading the file to Telegram…"
-  }
+  },
+  "too_large_plain": "The file exceeds Telegram’s 50 MB limit. Choose a shorter recording."
 }
