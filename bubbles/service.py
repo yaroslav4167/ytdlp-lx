@@ -190,6 +190,8 @@ class Bubble:
         self.summary = {}
         self.deleted = False
         self.published_covers = None
+        self.artwork_ready = asyncio.Event()
+        self.cover_replay = None
 
     def search_results(self):
         self.state['title']=shorten(self.state.get('title'),64)
@@ -204,7 +206,8 @@ class Bubble:
             row=max(rows,key=lambda r:len(r[1].encode()))
             if len(row[1].encode())<=32:raise ValueError('Search rows exceed widget state limit')
             row[1]=shorten(row[1],len(row[1].encode())-8)
-        if all(r[1]==(self.items[r[0]].get('full_title') or self.items[r[0]]['title']) for r in rows):
+        if (not any(v.get('thumbnail') for v in self.items)
+                and all(r[1]==(self.items[r[0]].get('full_title') or self.items[r[0]]['title']) for r in rows)):
             self.state.pop('fetch',None)
 
     def cover_indices(self):
@@ -225,11 +228,14 @@ class Bubble:
             return state_json({'atlas':self.cover_atlas} if self.cover_atlas else {})
         return state_json({str(i):self.covers[i] for i in self.cover_indices() if self.covers.get(i)})
 
-    async def publish(self):
+    async def publish(self, artwork=None):
         """Serialize updates so late progress cannot overwrite terminal states."""
         async with self.lock:
+            if self.deleted or (artwork is not None and (self.state.get('view')!='search' or self.state.get('error')
+                    or self.service.entries.get((self.chat_id,self.message_id)) is not self)):
+                return
             serialized = state_json(self.state)
-            covers = self.cover_data()
+            covers = artwork if artwork is not None else self.cover_data()
             if serialized == self.published and covers == self.published_covers:
                 return
             try:
@@ -247,6 +253,25 @@ class Bubble:
             except Exception as error:
                 if 'message is not modified' not in str(error).lower():
                     LOG.warning('Widget update failed (%s)', type(error).__name__)
+
+    def start_cover_replay(self):
+        if not any(v.get('thumbnail') for v in self.items):return
+        if self.cover_replay is None or self.cover_replay.done():
+            self.cover_replay=self.context.application.create_task(self.replay_covers())
+
+    async def replay_covers(self):
+        try:
+            await asyncio.wait_for(self.artwork_ready.wait(),20)
+        except asyncio.TimeoutError:
+            return
+        if self.cover_atlas:
+            await self.publish(state_json({'atlas':self.cover_atlas}))
+        for index, image in list(self.covers.items()):
+            if not image:continue
+            await asyncio.sleep(1.1)
+            if (self.deleted or self.state.get('view')!='search' or self.state.get('error')
+                    or self.service.entries.get((self.chat_id,self.message_id)) is not self):return
+            await self.publish(state_json({str(index):image}))
 
     def problem_state(self, kind):
         self.state = {'view':self.state['view'], 'title':self.state.get('title', ''),
@@ -500,6 +525,8 @@ class BubbleService:
                 await entry.publish()
         except Exception as exception:
             LOG.warning('Background artwork failed (%s)', type(exception).__name__)
+        finally:
+            entry.artwork_ready.set()
 
     async def handle_widget(self, update, context):
         query = getattr(update, 'widget_query', None)
@@ -559,7 +586,7 @@ class BubbleService:
         parts = data.split('|')
         if (len(parts)==2 and parts[0]=='names' and parts[1].isascii() and parts[1].isdigit()
                 and entry.state.get('view')=='search' and not entry.state.get('error')):
-            cursor=int(parts[1]);rows=[]
+            cursor=int(parts[1]);initial=cursor==0;rows=[]
             if cursor>=len(entry.items):
                 await answer(words['unavailable']);return
             while cursor<len(entry.items):
@@ -569,6 +596,7 @@ class BubbleService:
                 if len(payload.encode())>1024:break
                 rows=candidate;cursor+=1
             await answer(json.dumps([cursor,rows],ensure_ascii=False,separators=(',',':')))
+            if initial:entry.start_cover_replay()
             return
         if data == 'resend':
             if entry.state.get('error') not in ('send', 'uncertain') or not entry.filename or time.monotonic() >= entry.file_deadline or not Path(entry.filename).is_file():
