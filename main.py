@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import ipaddress
 import socket
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from yandex_music import is_yandex_music_url, yandex_to_youtube
@@ -51,8 +52,10 @@ def get_yt_dlp():
     return yt_dlp
 
 def ydl_options(options=None):
+    bundled_deno = os.path.join(os.path.dirname(__file__), '.tools', 'deno')
+    deno = os.environ.get('YTDLP_DENO') or (bundled_deno if os.path.isfile(bundled_deno) else shutil.which('deno'))
     result = {
-        'js_runtimes': {'node': {}},
+        'js_runtimes': {'deno': {'path': deno}} if deno else {'node': {}},
         'socket_timeout': 15,
     }
     if options:
@@ -1000,7 +1003,10 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
         filename, info = await download_media(url, format_choice=format_choice, progress_cb=progress_hook)
     except Exception as e:
         print(f"Download error: {e}")
-        await edit_text_retry(msg, words["source_failed"])
+        if getattr(msg, 'is_bubble', False) and 'video is not available' in str(e).lower():
+            await msg.error('unavailable')
+        else:
+            await edit_text_retry(msg, words["source_failed"])
         return
 
     if not filename or not os.path.exists(filename):

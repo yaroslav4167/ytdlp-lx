@@ -26,8 +26,8 @@ from the Yandex version. Albums and playlists are not supported.
 
 ## Requirements
 
-- Linux or another Python 3.10+ environment
-- Python 3.10+
+- Linux or another Python 3.11+ environment
+- Python 3.11+
 - FFmpeg and FFprobe
 - Telegram bot token from `@BotFather`
 - Optional Spotify Web API credentials
@@ -122,8 +122,10 @@ behavior, and the 10-minute retry window for files whose delivery failed.
 
 Widget mode has no extra caption or native inline keyboard. A URL offers direct
 “Download audio” / “Download video” actions. Real mini-covers are embedded from
-media metadata; after sending, the card becomes a recording summary. Unconfirmed
+media metadata; after sending, the loading card is removed. Unconfirmed
 media-upload outcomes are not automatically retried, preventing timeout-driven
 duplicate files; the card asks the user to check the chat before a manual resend.
 
-Search cards show all eight recordings as a flat list without pagination. The selected recording keeps its cover throughout downloading, conversion, sending and the final summary. Telegram does not support a scrollbar inside widgets; vertical gestures scroll the chat.
+Search cards show all eight recordings as a flat list without pagination. The selected recording keeps its cover throughout downloading, conversion, and sending. Telegram does not support a scrollbar inside widgets; vertical gestures scroll the chat.
+
+YouTube downloads require `yt-dlp[default]` (including EJS) and Deno >=2.3 or Node >=22. Deno is detected at `.tools/deno`, on PATH, or through `YTDLP_DENO`. Use the application virtual environment so these dependencies do not change other bots.

@@ -17,7 +17,7 @@ from bubbles.service import BubbleService, RETAINED_FILES, item, load_design, lo
 class BubbleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.bot = SimpleNamespace(do_api_request=AsyncMock(return_value={'message_id': 42}),
-            edit_message_caption=AsyncMock(), send_message=AsyncMock())
+            edit_message_caption=AsyncMock(), send_message=AsyncMock(), delete_message=AsyncMock())
         self.tasks = []
         def create_task(coro):
             task = asyncio.create_task(coro)
@@ -102,12 +102,21 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(json.loads(entry.cover_data())),{'atlas'})
         self.assertEqual(len(heroes),8)
 
-    async def test_summary_refresh_failure_does_not_become_delivery_failure(self):
+    async def test_delete_failure_does_not_restart_delivery(self):
         entry=await self.card();await entry.begin(0,'mp3')
-        with patch('bubbles.service.thumbnail',AsyncMock(side_effect=RuntimeError('image unavailable'))):
+        self.bot.delete_message.side_effect=RuntimeError('temporary delete error')
+        with patch('bubbles.service.asyncio.sleep', AsyncMock()):
             await entry.complete()
         self.assertEqual(entry.state['stage'],'done')
         self.assertNotIn('error',entry.state)
+        self.send.assert_not_awaited()
+        self.assertEqual(self.bot.delete_message.await_count,2)
+
+    def test_configured_deno_is_used_without_changing_other_options(self):
+        with patch.dict(os.environ, {'YTDLP_DENO':'/app/deno'}):
+            opts=main.ydl_options({'format':'bestaudio'})
+        self.assertEqual(opts['js_runtimes'],{'deno':{'path':'/app/deno'}})
+        self.assertEqual(opts['format'],'bestaudio')
 
     async def test_ambiguous_media_delivery_is_not_retried(self):
         from bubbles.delivery import send_media, AmbiguousDelivery
@@ -137,22 +146,21 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.send.await_count,1)
         self.assertTrue(Path(filename).exists())
 
-    async def test_completed_card_has_actual_metadata_and_no_download_actions(self):
-        entry = await self.card()
-        await entry.begin(0, 'mp3')
+    async def test_completed_card_is_removed_once_without_summary(self):
+        entry=await self.card();await entry.begin(0,'mp3')
         with tempfile.NamedTemporaryFile(suffix='.m4a') as file:
             file.write(b'audio');file.flush()
-            entry.media_ready(file.name, {'title':'Actual title','uploader':'Artist','duration':245})
-            await entry.complete()
-        self.assertEqual(entry.state['stage'], 'done')
-        self.assertEqual(entry.state['title'], 'Actual title')
-        self.assertEqual(entry.state['artist'], 'Artist')
-        self.assertEqual(entry.state['duration'], '4:05')
-        self.assertEqual(entry.state['format'], 'm4a')
-        self.assertIn('MiB', entry.state['size'])
+            entry.media_ready(file.name,{'title':'Actual title','uploader':'Artist','duration':245})
+            self.assertEqual(entry.state['duration'],'4:05')
+            self.assertEqual(entry.state['format'],'m4a')
+            self.bot.do_api_request.reset_mock()
+            await entry.complete();await entry.delete()
+        self.assertEqual(entry.state['stage'],'done')
+        self.assertTrue(entry.deleted)
+        self.bot.delete_message.assert_awaited_once()
+        self.bot.do_api_request.assert_not_awaited()
         await self.dispatch('dl|0|mp3')
         self.download.assert_not_awaited()
-        self.bot.edit_message_caption.assert_not_awaited()
 
     def test_thumbnails_reject_private_and_unsupported_urls(self):
         from bubbles.thumbnails import validate_image_url
