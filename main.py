@@ -981,14 +981,14 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
         try:
             info = await probe_url(url) or {}
             card = await service.send(context, source_message,
-                [bubble_item(url, info)], title=info.get('title') or '', view='progress')
+                [bubble_item(url, info)], title=info.get('title') or '', view='progress', reuse=msg)
         except BaseException:
             service.busy_users.discard(owner)
             raise
         if not card:
             service.busy_users.discard(owner)
         if card:
-            if msg:
+            if msg and getattr(msg, 'message_id', None) != card.message_id:
                 try:
                     await msg.delete()
                 except Exception:
@@ -1253,12 +1253,13 @@ async def language_command(update, context):
 async def try_bubble(context, source, progress_message, items, title='', view='format', error=None):
     service = bubble_service(context)
     if service:
-        card = await service.send(context, source, items, title, view, error)
+        card = await service.send(context, source, items, title, view, error, reuse=progress_message)
         if card:
-            try:
-                await progress_message.delete()
-            except Exception:
-                pass
+            if getattr(progress_message, 'message_id', None) != card.message_id:
+                try:
+                    await progress_message.delete()
+                except Exception:
+                    pass
             return card
     return None
 

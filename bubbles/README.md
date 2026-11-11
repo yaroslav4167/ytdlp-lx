@@ -65,7 +65,7 @@ The loading card uses the same small square artwork to the left of the recording
 
 ## Response latency
 
-A small animated processing widget is sent before search or URL inspection. The final card replaces it; if an error requires the text fallback, the placeholder is replaced by one editable text message.
+A single widget is sent before search or URL inspection, with all view templates already included. Processing, search results or format selection, and download/conversion/upload update the state of that same message. An error also updates it in place. If widget editing fails, the placeholder falls back to one editable text message.
 
 Search uses flat result metadata immediately. It does not fully extract all eight videos before showing the list. Source format validation happens only after download selection. Ordinary search keyboards also avoid per-result requests. A direct link reuses one probe for playlist detection, media types and card metadata.
 
