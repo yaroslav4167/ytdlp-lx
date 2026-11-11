@@ -26,6 +26,7 @@ DOWNLOAD_PROXY = os.environ.get("DOWNLOAD_PROXY", "")
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 STALE_FILE_AGE = 600
 MAX_CALLBACK_LINKS = 32
+SEARCH_TIMEOUT = 25
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -502,27 +503,26 @@ async def download_instagram_photo(url: str):
         raise Exception('The Instagram photo exceeds the 50 MB limit')
     return [path], {'title': 'Instagram photo', 'uploader': ''}
 
-async def url_is_playlist(url: str) -> bool:
-    """True, если ссылка ведёт на плейлист (несколько роликов)."""
-    info = await probe_url(url)
-    if not info:
-        return False
-    if info.get('_type') == 'playlist':
-        return True
-    entries = info.get('entries')
-    return bool(entries and len(entries) > 1)
+def info_is_playlist(info):
+    return bool(info and (info.get('_type') == 'playlist' or len(info.get('entries') or []) > 1))
 
-async def url_media_types(url: str):
-    info = await probe_url(url)
-    if not info:
-        return False, False
-    formats = info.get('formats', [])
+
+def info_media_types(info):
+    formats = (info or {}).get('formats', [])
     has_audio = any(format_has_audio(f) for f in formats)
     has_video = any(format_has_video(f) for f in formats)
     direct_exts = {f.get('ext') for f in formats if f.get('url')}
-    has_audio = has_audio or bool(direct_exts & {'mp3', 'm4a', 'aac', 'ogg', 'opus', 'wav'})
-    has_video = has_video or bool(direct_exts & {'mp4', 'webm', 'mkv', 'mov', 'avi'})
-    return has_audio, has_video
+    return (has_audio or bool(direct_exts & {'mp3','m4a','aac','ogg','opus','wav'}),
+            has_video or bool(direct_exts & {'mp4','webm','mkv','mov','avi'}))
+
+
+async def url_is_playlist(url: str) -> bool:
+    return info_is_playlist(await probe_url(url))
+
+
+async def url_media_types(url: str):
+    return info_media_types(await probe_url(url))
+
 
 def format_has_audio(fmt):
     return fmt.get('acodec') not in (None, 'none') or fmt.get('audio_ext') not in (None, 'none')
@@ -1131,7 +1131,10 @@ async def search_youtube(query: str):
 #            'cookiefile': "cookies.txt",
 #            'quiet': True,
             'skip_download': True,
-            'extract_flat': 'in_playlist'
+            'extract_flat': 'in_playlist',
+            'socket_timeout': 8,
+            'retries': 1,
+            'extractor_retries': 1,
         }
         with ProxyRetryYoutubeDL(ydl_options(ydl_opts)) as ydl:
             return ydl.extract_info(f"ytsearch8:{query}", download=False)
@@ -1169,14 +1172,6 @@ async def make_results_keyboard(results, context):
     words = context_words(context)
 
     buttons = []
-    urls = [
-        f"https://www.youtube.com/watch?v={info.get('id')}"
-        for info in results
-        if info.get('id')
-    ]
-    media_types = await asyncio.gather(*(url_media_types(url) for url in urls))
-    type_index = 0
-
     for index, info in enumerate(results, start=1):
         video_id = info.get('id')
         if not video_id:
@@ -1184,8 +1179,9 @@ async def make_results_keyboard(results, context):
 
         url = f"https://www.youtube.com/watch?v={video_id}"
         url_id = store_callback_url(context, url)
-        has_audio, has_video = media_types[type_index]
-        type_index += 1
+        has_audio, has_video = info_media_types(info)
+        if not has_audio and not has_video:
+            has_audio = has_video = True
         row = []
         if has_audio:
             row.append(InlineKeyboardButton(f"{index}. {words['audio']}", callback_data=f"dl|{url_id}|mp3"))
@@ -1256,7 +1252,10 @@ async def try_bubble(context, source, progress_message, items, title='', view='f
 async def process_message(update, context):
     text = (update.message.text or "").strip()
     words = ui_words(update, context)
-    msg = await telegram_retry(lambda: update.message.reply_text(words["processing"]))
+    service = bubble_service(context)
+    msg = await service.send_loading(context, update.message) if service else None
+    if msg is None:
+        msg = await telegram_retry(lambda: update.message.reply_text(words["processing"]))
 
     parts = text.split()
     if parts and parts[-1].lower() in ("mp3", "mp4"):
@@ -1287,10 +1286,11 @@ async def process_message(update, context):
                 return
             await download_and_send(context, update.message, spotify_url, "mp3", msg=msg)
             return
-        if await url_is_playlist(url):
+        info = await probe_url(url)
+        if info_is_playlist(info):
             await edit_text_retry(msg, words["playlist"])
             return
-        has_audio, has_video = await url_media_types(url)
+        has_audio, has_video = info_media_types(info)
         if not has_audio and not has_video:
             has_audio = has_video = True
         if has_audio != has_video:
@@ -1299,7 +1299,7 @@ async def process_message(update, context):
             return
         service = bubble_service(context)
         if service and service.enabled(update.message, context):
-            info = await probe_url(url) or {}
+            info = info or {}
             if await try_bubble(context, update.message, msg,
                     [bubble_item(url, info, has_audio, has_video)], title=info.get('title') or query):
                 return
@@ -1315,7 +1315,13 @@ async def process_message(update, context):
             print(f"Message edit error: {e}")
         return
 
-    results = await search_youtube(query)
+    try:
+        results = await asyncio.wait_for(search_youtube(query), timeout=SEARCH_TIMEOUT)
+    except Exception as exception:
+        print(f'Search failed: {type(exception).__name__}')
+        if not await try_bubble(context,update.message,msg,[],query,view='search',error='search'):
+            await edit_text_retry(msg,words['search_failed'])
+        return
     if not results:
         if await try_bubble(context, update.message, msg, [], query, view='search', error='empty'):
             return
@@ -1327,8 +1333,8 @@ async def process_message(update, context):
         items = []
         usable = [info for info in results if info.get('id')]
         urls = [f"https://www.youtube.com/watch?v={info['id']}" for info in usable]
-        types = await asyncio.gather(*(url_media_types(url) for url in urls))
-        for url, info, (audio, video) in zip(urls, usable, types):
+        for url, info in zip(urls, usable):
+            audio, video = info_media_types(info)
             if not audio and not video:
                 audio = video = True
             items.append(bubble_item(url, info, audio, video))

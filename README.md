@@ -129,3 +129,5 @@ duplicate files; the card asks the user to check the chat before a manual resend
 Search cards show all eight recordings as a flat list without pagination. The selected recording keeps its cover throughout downloading, conversion, and sending. Telegram does not support a scrollbar inside widgets; vertical gestures scroll the chat.
 
 YouTube downloads require `yt-dlp[default]` (including EJS) and Deno >=2.3 or Node >=22. Deno is detected at `.tools/deno`, on PATH, or through `YTDLP_DENO`. Use the application virtual environment so these dependencies do not change other bots.
+
+Search results are shown before optional thumbnail downloads, without fully inspecting every result. An animated processing bubble replaces the initial plain-text wait message. Upload status reads “Отправка…” / “Sending…”.
