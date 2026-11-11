@@ -72,8 +72,12 @@ def load_design(language):
             except (OSError, ValueError, KeyError):
                 pass
         source = source.replace(f'__{key}__', fragment)
-    keys = set(re.findall(r'\bI\.([a-z_]+)', source) + re.findall(r'data-i18n="([a-z_]+)"', source))
-    translations = {k: v for k, v in strings(language).items() if k in keys}
+    keys = list(dict.fromkeys(re.findall(r'\bI\.([a-z_]+)', source) + re.findall(r'data-i18n="([a-z_]+)"', source)))
+    positions = {key:index for index,key in enumerate(keys)}
+    words = strings(language)
+    translations = [words[key] for key in keys]
+    source = re.sub(r'\bI\.([a-z_]+)',lambda m:f'I[{positions[m[1]]}]',source)
+    source = re.sub(r'data-i18n="([a-z_]+)"',lambda m:f'data-i18n="{positions[m[1]]}"',source)
     source = source.replace('__I18N__', json.dumps(translations, ensure_ascii=True,
                                                   separators=(',', ':')).replace('<', '\\u003c'))
     source = source.replace('lang="ru"', f'lang="{locale(language)}"')
