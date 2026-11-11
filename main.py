@@ -12,6 +12,8 @@ import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from yandex_music import is_yandex_music_url, yandex_to_youtube
+from bubbles import BubbleService, RETAINED_FILES
+from bubbles.service import item as bubble_item, strings as bubble_strings, user_language
 
 # Runtime configuration. Secrets are supplied through the environment.
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -32,7 +34,7 @@ def cleanup_stale_downloads(max_age=STALE_FILE_AGE):
     prefixes = ("video_", "audio_", "input_", "output_")
     try:
         for entry in os.scandir(DOWNLOAD_DIR):
-            if entry.is_file() and entry.name.startswith(prefixes):
+            if entry.is_file() and entry.name.startswith(prefixes) and entry.path not in RETAINED_FILES:
                 if now - entry.stat().st_mtime > max_age:
                     os.remove(entry.path)
     except OSError as error:
@@ -284,7 +286,8 @@ def get_telegram_components():
         'HTTPXRequest': HTTPXRequest,
     }
 
-def make_progress_hook(msg, loop):
+def make_progress_hook(msg, loop, words=None):
+    words = words or bubble_strings()
     last_update = {'time': 0, 'text': None}
     bar_length = 20
 
@@ -308,6 +311,9 @@ def make_progress_hook(msg, loop):
 
     async def progress_hook_async(d):
         try:
+            if getattr(msg, 'is_bubble', False):
+                await msg.update_progress(d)
+                return
             status = d.get('status')
             if status == 'downloading':
                 now = time.time()
@@ -325,14 +331,14 @@ def make_progress_hook(msg, loop):
                 eta_str = f"{eta}s" if eta else "N/A"
 
                 text = (
-                    f"⬇️ Downloading...\n"
+                    f"{words['download_plain']}\n"
                     f"{progress_bar(percent)}\n"
-                    f"Speed: {speed_str}\n"
-                    f"Remaining: {eta_str}"
+                    f"{words['speed_plain']}: {speed_str}\n"
+                    f"{words['remaining_plain']}: {eta_str}"
                 )
                 await edit_progress(text)
             elif status == 'finished':
-                await edit_progress("✅ Downloaded, converting file...")
+                await edit_progress(words["converted_plain"])
             elif status == 'converting':
                 now = time.time()
                 if now - last_update['time'] < 1:
@@ -340,10 +346,10 @@ def make_progress_hook(msg, loop):
                 last_update['time'] = now
                 percent = d.get('percent', 0)
                 await edit_progress(
-                    f"🔄 Converting...\n{progress_bar(percent)}"
+                    f"{words['convert_plain']}\n{progress_bar(percent)}"
                 )
             elif status == 'error':
-                await edit_progress("❌ Download error.")
+                await edit_progress(words["download_error_plain"])
         except Exception as e:
             print(f"Progress update error: {e}")
 
@@ -926,12 +932,60 @@ def downloaded_size(path: str) -> int:
 # ---------------------------------------------------------------------------
 # Telegram handlers and per-user callback state
 # ---------------------------------------------------------------------------
+async def send_media_file(context, chat_id, filename, info):
+    """Send an existing file; used by initial delivery and widget resend."""
+    downloaded_size(filename)
+    InputFile = get_telegram_components()['InputFile']
+    ext = os.path.splitext(filename)[1].lower()
+
+    async def send_file():
+        with open(filename, 'rb') as stream:
+            file = InputFile(stream, filename=safe_download_filename(info, ext))
+            if ext in {'.mp3', '.m4a', '.flac', '.ogg', '.opus'}:
+                return await context.bot.send_audio(chat_id=chat_id, audio=file)
+            if ext in {'.webm', '.mkv'}:
+                return await context.bot.send_document(chat_id=chat_id, document=file)
+            return await context.bot.send_video(chat_id=chat_id, video=file)
+
+    return await telegram_retry(send_file)
+
+
 async def download_and_send(context, source_message, url, format_choice, msg=None, delete_source=False):
+    service = bubble_service(context)
+    if (not getattr(msg, 'is_bubble', False) and service
+            and not getattr(getattr(source_message, 'from_user', None), 'is_bot', True)
+            and service.enabled(source_message, context)):
+        owner = source_message.from_user.id
+        if owner in service.busy_users:
+            await source_message.reply_text(bubble_strings(user_language(
+                source_message.from_user, context.user_data))['busy'])
+            return
+        service.busy_users.add(owner)
+        try:
+            card = await service.send(context, source_message,
+                [bubble_item(url)], title='', view='progress')
+        except BaseException:
+            service.busy_users.discard(owner)
+            raise
+        if not card:
+            service.busy_users.discard(owner)
+        if card:
+            if msg:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+            card.format = format_choice
+            card.busy = True
+            service.busy_users.add(owner)
+            await service.run(card, 'download')
+            return
     cleanup_stale_downloads()
+    words = context_words(context)
     chat_id = source_message.chat_id
     if msg is None:
         msg = await telegram_retry(
-            lambda: context.bot.send_message(chat_id=chat_id, text="⬇️ Downloading..."))
+            lambda: context.bot.send_message(chat_id=chat_id, text=words["download_plain"]))
     if delete_source:
         try:
             await source_message.delete()
@@ -939,45 +993,37 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
             pass
 
     loop = asyncio.get_running_loop()
-    progress_hook = make_progress_hook(msg, loop)
+    progress_hook = make_progress_hook(msg, loop, context_words(context))
     try:
         filename, info = await download_media(url, format_choice=format_choice, progress_cb=progress_hook)
     except Exception as e:
-        await edit_text_retry(msg, f"Download error: {e}")
+        print(f"Download error: {e}")
+        await edit_text_retry(msg, words["source_failed"])
         return
 
     if not filename or not os.path.exists(filename):
-        await edit_text_retry(msg, "Could not prepare the file for sending.")
+        await edit_text_retry(msg, words["prepare_failed"])
         return
 
-    comps = get_telegram_components()
-    InputFile = comps['InputFile']
-    await edit_text_retry(msg, "📤 Sending file...")
-    ext = os.path.splitext(filename)[1].lower()
-    audio_exts = {'.mp3', '.m4a', '.flac', '.ogg', '.opus'}
-    document_exts = {'.webm', '.mkv'}
+    if getattr(msg, 'is_bubble', False):
+        if info.get('title'):
+            from bubbles.service import shorten
+            msg.state['title'] = shorten(info['title'], 160)
+    await edit_text_retry(msg, words["sending_plain"])
     sent = False
 
-    async def send_file():
-        with open(filename, 'rb') as stream:
-            file_to_send = InputFile(
-                stream,
-                filename=safe_download_filename(info, ext),
-            )
-            if ext in audio_exts:
-                return await context.bot.send_audio(chat_id=chat_id, audio=file_to_send)
-            elif ext in document_exts:
-                return await context.bot.send_document(chat_id=chat_id, document=file_to_send)
-            else:
-                return await context.bot.send_video(chat_id=chat_id, video=file_to_send)
-
     try:
-        await telegram_retry(send_file)
+        await send_media_file(context, chat_id, filename, info)
         sent = True
+        if getattr(msg, 'is_bubble', False):
+            await msg.complete()
     except Exception as e:
         print(f"File sending error: {e}")
+        if getattr(msg, 'is_bubble', False):
+            await msg.send_failed(filename, info)
+            return
         await telegram_retry(lambda: context.bot.send_message(
-            chat_id=chat_id, text=f"File sending error.\n{e}"))
+            chat_id=chat_id, text=words["sending_failed"]))
 
     try:
         os.remove(filename)
@@ -1098,14 +1144,15 @@ def store_callback_url(context, url):
 
 def make_format_keyboard(url, context, include_audio=True, include_video=True):
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    words = context_words(context)
 
     url_id = store_callback_url(context, url)
 
     buttons = []
     if include_audio:
-        buttons.append(InlineKeyboardButton("🎵 Audio", callback_data=f"dl|{url_id}|mp3"))
+        buttons.append(InlineKeyboardButton("♫ " + words["audio"], callback_data=f"dl|{url_id}|mp3"))
     if include_video:
-        buttons.append(InlineKeyboardButton("🎬 Video", callback_data=f"dl|{url_id}|mp4"))
+        buttons.append(InlineKeyboardButton("▷ " + words["video"], callback_data=f"dl|{url_id}|mp4"))
 
     keyboard = InlineKeyboardMarkup([buttons])
     return keyboard
@@ -1113,6 +1160,7 @@ def make_format_keyboard(url, context, include_audio=True, include_video=True):
 async def make_results_keyboard(results, context):
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     import hashlib
+    words = context_words(context)
 
     buttons = []
     urls = [
@@ -1134,24 +1182,75 @@ async def make_results_keyboard(results, context):
         type_index += 1
         row = []
         if has_audio:
-            row.append(InlineKeyboardButton(f"{index}. Audio", callback_data=f"dl|{url_id}|mp3"))
+            row.append(InlineKeyboardButton(f"{index}. {words['audio']}", callback_data=f"dl|{url_id}|mp3"))
         if has_video:
-            row.append(InlineKeyboardButton(f"{index}. Video", callback_data=f"dl|{url_id}|mp4"))
+            row.append(InlineKeyboardButton(f"{index}. {words['video']}", callback_data=f"dl|{url_id}|mp4"))
         if not row:
-            row.append(InlineKeyboardButton(f"{index}. Video", callback_data=f"dl|{url_id}|mp4"))
+            row.append(InlineKeyboardButton(f"{index}. {words['video']}", callback_data=f"dl|{url_id}|mp4"))
         if row:
             buttons.append(row)
 
     return InlineKeyboardMarkup(buttons)
 
+def bubble_service(context):
+    app = getattr(context, 'application', None)
+    return app.bot_data.get('bubbles') if app is not None else None
+
+
+def context_words(context):
+    preferences = getattr(context, 'user_data', None) or {}
+    return bubble_strings(preferences.get('language') or preferences.get('telegram_language'))
+
+
+def ui_words(update, context):
+    preferences = getattr(context, 'user_data', None)
+    user = getattr(update, 'effective_user', None)
+    if preferences is not None:
+        preferences['telegram_language'] = getattr(user, 'language_code', None)
+    return bubble_strings(user_language(user, preferences))
+
+
 async def start(update, context):
-    await telegram_retry(lambda: update.message.reply_text(
-        "Send a link or a track/video name.\n"
-        "After searching or opening a link, choose audio or video."))
+    await telegram_retry(lambda: update.message.reply_text(ui_words(update, context)['start']))
+
+
+async def bubble_mode(update, context):
+    enabled = update.message.text.split()[0].split('@')[0] == '/bubbles'
+    context.user_data['bubbles_enabled'] = enabled
+    await update.message.reply_text(ui_words(update, context)['widget_on' if enabled else 'widget_off'])
+
+
+async def language_command(update, context):
+    from bubbles.service import locale
+    choice = context.args[0].lower() if context.args else ''
+    if choice == 'auto':
+        context.user_data.pop('language', None)
+    elif choice and locale(choice) == choice:
+        context.user_data['language'] = choice
+    else:
+        await update.message.reply_text(ui_words(update, context)['language_help'])
+        return
+    await update.message.reply_text(ui_words(update, context)['language_set'].format(
+        language=user_language(update.effective_user, context.user_data)))
+
+
+async def try_bubble(context, source, progress_message, items, title='', view='format', error=None):
+    service = bubble_service(context)
+    if service:
+        card = await service.send(context, source, items, title, view, error)
+        if card:
+            try:
+                await progress_message.delete()
+            except Exception:
+                pass
+            return card
+    return None
+
 
 async def process_message(update, context):
     text = (update.message.text or "").strip()
-    msg = await telegram_retry(lambda: update.message.reply_text("⏳ Processing..."))
+    words = ui_words(update, context)
+    msg = await telegram_retry(lambda: update.message.reply_text(words["processing"]))
 
     parts = text.split()
     if parts and parts[-1].lower() in ("mp3", "mp4"):
@@ -1183,7 +1282,7 @@ async def process_message(update, context):
             await download_and_send(context, update.message, spotify_url, "mp3", msg=msg)
             return
         if await url_is_playlist(url):
-            await edit_text_retry(msg, "Playlists are not supported. Send a link to a single video.")
+            await edit_text_retry(msg, words["playlist"])
             return
         has_audio, has_video = await url_media_types(url)
         if not has_audio and not has_video:
@@ -1192,6 +1291,12 @@ async def process_message(update, context):
             format_choice = "mp3" if has_audio else "mp4"
             await download_and_send(context, update.message, url, format_choice, msg=msg)
             return
+        service = bubble_service(context)
+        if service and service.enabled(update.message, context):
+            info = await probe_url(url) or {}
+            if await try_bubble(context, update.message, msg,
+                    [bubble_item(url, info, has_audio, has_video)], title=info.get('title') or query):
+                return
         keyboard = make_format_keyboard(url, context, include_audio=has_audio, include_video=has_video)
         # Проверяем тип клавиатуры
         from telegram import InlineKeyboardMarkup
@@ -1199,18 +1304,33 @@ async def process_message(update, context):
             await edit_text_retry(msg, "Error: invalid keyboard format")
             return
         try:
-            await edit_text_retry(msg, "Choose a download format:", reply_markup=keyboard)
+            await edit_text_retry(msg, words["choose_plain"], reply_markup=keyboard)
         except Exception as e:
             print(f"Message edit error: {e}")
         return
 
     results = await search_youtube(query)
     if not results:
-        await edit_text_retry(msg, "Nothing found.")
+        if await try_bubble(context, update.message, msg, [], query, view='search', error='empty'):
+            return
+        await edit_text_retry(msg, words["nothing"])
         return
 
+    service = bubble_service(context)
+    if service and service.enabled(update.message, context):
+        items = []
+        usable = [info for info in results if info.get('id')]
+        urls = [f"https://www.youtube.com/watch?v={info['id']}" for info in usable]
+        types = await asyncio.gather(*(url_media_types(url) for url in urls))
+        for url, info, (audio, video) in zip(urls, usable, types):
+            if not audio and not video:
+                audio = video = True
+            items.append(bubble_item(url, info, audio, video))
+        if await try_bubble(context, update.message, msg, items, query, view='search',
+                            error='empty' if not items else None):
+            return
     keyboard = await make_results_keyboard(results, context)
-    lines = ["🔎 Found tracks:"]
+    lines = [words["found_plain"]]
     for index, info in enumerate(results, start=1):
         title = (info.get('title') or 'Untitled').strip()
         uploader = (info.get('uploader') or 'Unknown artist').strip()
@@ -1220,13 +1340,17 @@ async def process_message(update, context):
 
 async def callback(update, context):
     query = update.callback_query
+    words = ui_words(update, context)
+    if (query.data or '').startswith('bubble|'):
+        await bubble_service(context).handle_callback(update, context)
+        return
     await query.answer()
 
     data = query.data.split('|')
     links = context.user_data.get('media_links', {})
     if data[0] == "pick":
         if len(data) != 2 or not links.get(data[1]):
-            await telegram_retry(lambda: query.message.reply_text("The link has expired or is invalid."))
+            await telegram_retry(lambda: query.message.reply_text(words["expired_hint"]))
             return
 
         has_audio, has_video = await url_media_types(links[data[1]])
@@ -1237,11 +1361,11 @@ async def callback(update, context):
             include_audio=has_audio,
             include_video=has_video,
         )
-        await edit_text_retry(query.message, "Choose a download format:", reply_markup=keyboard)
+        await edit_text_retry(query.message, words["choose_plain"], reply_markup=keyboard)
         return
 
     if len(data) < 3 or data[0] != "dl":
-        await telegram_retry(lambda: query.message.reply_text("Invalid data."))
+        await telegram_retry(lambda: query.message.reply_text(words["invalid"]))
         return
     url_id = data[1]
     format_choice = data[2]
@@ -1249,16 +1373,16 @@ async def callback(update, context):
     url = links.get(url_id)
 
     if not url:
-        await telegram_retry(lambda: query.message.reply_text("The link has expired or is invalid."))
+        await telegram_retry(lambda: query.message.reply_text(words["expired_hint"]))
         return
 
     if not url or format_choice not in ("mp3", "mp4"):
-        await telegram_retry(lambda: query.message.reply_text("Invalid data."))
+        await telegram_retry(lambda: query.message.reply_text(words["invalid"]))
         return
 
     if await url_is_playlist(url):
         await telegram_retry(lambda: query.message.reply_text(
-            "Playlists are not supported. Send a link to a single video."))
+            words["playlist"]))
         return
 
     await download_and_send(context, query.message, url, format_choice, delete_source=True)
@@ -1296,14 +1420,23 @@ def build_app():
         .concurrent_updates(True)
         .build()
     )
+    from telegram import Update
+    from telegram.ext import TypeHandler
+    service = BubbleService(download_and_send, send_media_file)
+    app.bot_data['bubbles'] = service
+    app.add_handler(TypeHandler(Update, service.handle_widget), group=-1)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("bubbles", bubble_mode))
+    app.add_handler(CommandHandler("plain", bubble_mode))
+    app.add_handler(CommandHandler("language", language_command))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
     return app
 
 def run():
     app = build_app()
-    app.run_polling()
+    from telegram import Update
+    app.run_polling(allowed_updates=list(Update.ALL_TYPES) + ["widget_query"])
 
 if __name__ == "__main__":
     run()
