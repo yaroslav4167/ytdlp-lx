@@ -74,6 +74,8 @@ Covers are fetched and pushed in a background application task after the results
 
 ## Long recording titles
 
-Only the selected row scrolls, and only when its title overflows. Motion pauses at both ends and respects reduced-motion preferences. Tapping a row fetches its full title (up to 800 UTF-8 bytes) from the existing server registry; the compact eight-row payload stays within 1024 bytes. Download taps wait for any pending title request so widget requests never overlap. Titles are inserted as text, never HTML.
+All search titles wrap across lines; none scroll or get shortened to fit the shared payload. Selecting a row updates classes and format buttons in place, without rebuilding rows or reloading artwork. No title-lookup request is needed.
 
-After editing `widget.js`, run `python -m bubbles.build` (Node/npm required locally). It uses Terser 5.51.2 to produce `widget.min.js` and `widget.build.json`; deploy those with the source. Inline HTML handler names are preserved. The server needs no Node for this build: it uses the compact file only when both source and output hashes match, otherwise it reads the source and applies the same size checks. HTML/CSS/localization edits do not require rebuilding JavaScript.
+When full titles exceed the 1024-byte state budget or estimated widget height, results are split into consecutive cards with range labels. Short eight-result lists stay together. Every row keeps its original recording title; only secondary artist labels may shrink for an unusually large single title. Each card has local selection and the existing per-user download guard.
+
+After editing `widget.js`, run `python -m bubbles.build` (Node/npm required locally). It uses Terser 5.51.2 to produce `widget.min.js` and `widget.build.json`; deploy those with the source. Inline HTML handler names are preserved. The server needs no npm runtime: it uses the compact file only when source and output hashes match. HTML/CSS/localization edits do not require rebuilding JavaScript.

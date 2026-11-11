@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 import time
 import zlib
+import unicodedata
 
 ROOT = Path(__file__).parent
 LOG = logging.getLogger(__name__)
@@ -153,16 +154,41 @@ def item(url, info=None, audio=True, video=True):
                 duration=duration(info.get('duration')), audio=audio, video=video)
 
 
+def search_rows(items):
+    return [[i,v.get('full_title') or v['title'],v['artist'],v['duration'],
+             int(v['audio']) | (int(v['video']) << 1)] for i,v in enumerate(items[:8])]
+
+
+def search_groups(items, title):
+    """Keep complete titles; split only when state bytes or estimated height require it."""
+    groups, current, height = [], [], 0
+    for media in items[:8]:
+        label = media.get('full_title') or media['title']
+        units = sum(2 if unicodedata.east_asian_width(c) in ('W','F') else 1 for c in label)
+        row_height = max(46,26+17*math.ceil(max(1,units)/17))
+        candidate = current+[media]
+        state = {'view':'search','title':shorten(title,64),'total':len(candidate),
+                 'range':'1–8 / 8','rows':search_rows(candidate)}
+        size = len(json.dumps(state,ensure_ascii=False,separators=(',',':')).encode())
+        if current and (size>1024 or height+row_height>400):
+            groups.append(current);current=[];height=0
+        current.append(media);height+=row_height
+    if current:groups.append(current)
+    return groups
+
+
 class Bubble:
     is_bubble = True
 
-    def __init__(self, service, context, source, language, items, title, view):
+    def __init__(self, service, context, source, language, items, title, view, range_label=None):
         self.service, self.context, self.source = service, context, source
         self.language, self.words = language, strings(language)
         self.chat_id, self.owner = source.chat_id, source.from_user.id
         self.message_id = None
         self.items, self.selected, self.format = items, 0, 'mp3'
         self.state = {'view': view, 'title': shorten(title, 120)}
+        if range_label:
+            self.state['range']=range_label
         if view == 'search':
             self.state.update(total=len(items))
             self.search_results()
@@ -187,18 +213,14 @@ class Bubble:
         self.published_covers = None
 
     def search_results(self):
-        # Keep full labels whenever they fit; trim only to meet the 1024-byte state limit.
-        rows = [[i, v['title'], v['artist'], v['duration'],
-                 int(v['audio']) | (int(v['video']) << 1)]
-                for i, v in enumerate(self.items[:8])]
-        self.state['rows'] = rows
-        while len(json.dumps(self.state, ensure_ascii=False, separators=(',', ':')).encode()) > 1024:
-            fields = [(row, column, floor) for column, floor in ((2, 8), (1, 32))
-                      for row in rows if len(row[column].encode()) > floor]
-            if not fields:
-                raise ValueError('Search labels cannot fit widget state')
-            row, column, floor = max(fields, key=lambda f:len(f[0][f[1]].encode()))
-            row[column] = shorten(row[column], max(floor, len(row[column].encode())-8))
+        self.state['title']=shorten(self.state.get('title'),64)
+        self.state['rows']=search_rows(self.items)
+        # Only secondary artist labels may shrink; recording titles stay complete.
+        while len(json.dumps(self.state,ensure_ascii=False,separators=(',',':')).encode())>1024:
+            row=max(self.state['rows'],key=lambda r:len(r[2].encode()))
+            if row[2]:row[2]=shorten(row[2],max(0,len(row[2].encode())-8))
+            elif self.state['title']:self.state['title']=''
+            else:raise ValueError('Search title exceeds widget state limit')
 
     def cover_indices(self):
         return [self.selected] if self.items else []
@@ -443,9 +465,24 @@ class BubbleService:
             LOG.warning('Processing widget unavailable (%s)',type(exception).__name__)
             return None
 
-    async def send(self, context, source, items, title='', view='format', error=None, reuse=None):
+    async def send(self, context, source, items, title='', view='format', error=None, reuse=None,
+                   _grouped=False, _range=None):
         if not self.enabled(source, context):
             return None
+        if view=='search' and items and not error and not _grouped:
+            groups=search_groups(items,title)
+            if len(groups)>1:
+                first=None;start=0
+                for group in groups:
+                    label=f'{start+1}–{start+len(group)} / {len(items[:8])}'
+                    card=await self.send(context,source,group,title,view,reuse=reuse if first is None else None,
+                                         _grouped=True,_range=label)
+                    if card is None:
+                        if first:await first.error('search')
+                        return first
+                    if first is None:first=card
+                    start+=len(group)
+                return first
         self.prune()
         if len(self.entries) >= MAX_CARDS:
             return None
@@ -453,7 +490,7 @@ class BubbleService:
         if len(owned) >= 32:
             del self.entries[owned[0]]
         language = user_language(source.from_user, context.user_data)
-        entry = Bubble(self, context, source, language, items, title, view)
+        entry = Bubble(self, context, source, language, items, title, view, _range)
         if error:
             entry.problem_state(error)
         try:
@@ -550,14 +587,6 @@ class BubbleService:
         if owner in self.busy_users:
             await answer(words['busy']); return
         parts = data.split('|')
-        if (len(parts) == 2 and parts[0] == 'title' and parts[1].isascii() and parts[1].isdigit()
-                and entry.state.get('view') == 'search' and not entry.state.get('error')):
-            index = int(parts[1])
-            if index < len(entry.items):
-                await answer('title|' + (entry.items[index].get('full_title') or entry.items[index]['title']))
-            else:
-                await answer(words['unavailable'])
-            return
         if data == 'resend':
             if entry.state.get('error') not in ('send', 'uncertain') or not entry.filename or time.monotonic() >= entry.file_deadline or not Path(entry.filename).is_file():
                 entry.forget_file(remove=True)
