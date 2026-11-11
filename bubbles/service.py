@@ -155,7 +155,7 @@ def item(url, info=None, audio=True, video=True):
 
 def search_rows(items):
     return [[i,v.get('full_title') or v['title'],v['artist'],v['duration'],
-             int(v['audio']) | (int(v['video']) << 1)] for i,v in enumerate(items[:8])]
+             int(v['audio']) | (int(v['video']) << 1) | (4 if v.get('thumbnail') else 0)] for i,v in enumerate(items[:8])]
 
 
 class Bubble:
@@ -192,6 +192,8 @@ class Bubble:
         self.published_covers = None
         self.artwork_ready = asyncio.Event()
         self.cover_replay = None
+        self.cover_repairs = {}
+        self.cover_failures = {}
 
     def search_results(self):
         self.state['title']=shorten(self.state.get('title'),64)
@@ -272,6 +274,16 @@ class Bubble:
             if (self.deleted or self.state.get('view')!='search' or self.state.get('error')
                     or self.service.entries.get((self.chat_id,self.message_id)) is not self):return
             await self.publish(state_json({str(index):image}))
+
+    async def repair_cover(self, index):
+        image=await thumbnail(self.items[index].get('thumbnail'),hero=True)
+        if self.deleted or self.service.entries.get((self.chat_id,self.message_id)) is not self:return
+        if image:
+            self.covers[index]=image
+            await self.publish(state_json({str(index):image}))
+        else:
+            self.cover_failures[index]=self.cover_failures.get(index,0)+1
+            LOG.warning('Cover fetch failed for row %d (attempt %d)',index,self.cover_failures[index])
 
     def problem_state(self, kind):
         self.state = {'view':self.state['view'], 'title':self.state.get('title', ''),
@@ -587,9 +599,23 @@ class BubbleService:
         if (len(parts)==2 and parts[0]=='names' and parts[1].isascii() and parts[1].isdigit()
                 and entry.state.get('view')=='search' and not entry.state.get('error')):
             cursor=int(parts[1]);initial=cursor==0;rows=[]
-            if cursor>=len(entry.items):
+            count=len(entry.items)
+            if cursor>=count*2:
                 await answer(words['unavailable']);return
-            while cursor<len(entry.items):
+            if cursor>=count:
+                index=cursor-count
+                if entry.items[index].get('thumbnail') and not entry.artwork_ready.is_set():
+                    await answer(state_json([cursor,[]]));return
+                image=entry.covers.get(index)
+                if image or not entry.items[index].get('thumbnail') or entry.cover_failures.get(index,0)>=3:
+                    await answer(state_json([cursor+1,[[index,image]]]))
+                else:
+                    task=entry.cover_repairs.get(index)
+                    if task is None or task.done():
+                        entry.cover_repairs[index]=entry.context.application.create_task(entry.repair_cover(index))
+                    await answer(state_json([cursor,[]]))
+                return
+            while cursor<count:
                 media=entry.items[cursor]
                 candidate=rows+[[cursor,media.get('full_title') or media['title']]]
                 payload=json.dumps([cursor+1,candidate],ensure_ascii=False,separators=(',',':'))

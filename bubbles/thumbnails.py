@@ -3,6 +3,7 @@ import asyncio
 import base64
 import io
 import ipaddress
+import re
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
@@ -59,6 +60,31 @@ async def fetch_image(url):
     return None
 
 
+async def fetch_thumbnail_data(url):
+    """Retry a transient image failure and try public YouTube fallback sizes."""
+    if not url:return None
+    candidates=[url,url]
+    parsed=urlparse(url)
+    match=re.match(r'^/(?:vi|vi_webp)/([A-Za-z0-9_-]{11})/',parsed.path)
+    if parsed.hostname in ('i.ytimg.com','i1.ytimg.com','i2.ytimg.com','i3.ytimg.com','img.youtube.com') and match:
+        fallbacks=[f'https://i.ytimg.com/vi/{match[1]}/{name}.jpg' for name in ('hqdefault','mqdefault')]
+        candidates=[url]+[v for v in fallbacks if v!=url]+[url]
+    async def fetch():
+        for candidate in candidates:
+            try:
+                data=await fetch_image(candidate)
+                if data:
+                    with Image.open(io.BytesIO(data)) as image:
+                        if image.width*image.height>16_000_000:continue
+                        image.verify()
+                    return data
+            except (ValueError,OSError,Image.DecompressionBombError,aiohttp.ClientError,asyncio.TimeoutError):
+                continue
+        return None
+    try:return await asyncio.wait_for(fetch(),timeout=7)
+    except asyncio.TimeoutError:return None
+
+
 def encode_image(data, hero=False):
     """A dedicated 1024-byte public_data budget leaves HTML and chat_data free."""
     budget = 738 if hero else 210
@@ -83,7 +109,7 @@ async def thumbnail(url, hero=False):
     if not url:
         return None
     try:
-        data = await fetch_image(url)
+        data = await fetch_thumbnail_data(url)
         return await asyncio.to_thread(encode_image, data, hero) if data else None
     except (ValueError, OSError, Image.DecompressionBombError, aiohttp.ClientError, asyncio.TimeoutError):
         return None
@@ -127,7 +153,7 @@ async def search_thumbnails(urls):
             return None
         async with semaphore:
             try:
-                return await fetch_image(url)
+                return await fetch_thumbnail_data(url)
             except (ValueError, OSError, aiohttp.ClientError, asyncio.TimeoutError):
                 return None
     images = await asyncio.gather(*(fetch(url) for url in urls[:8]))
