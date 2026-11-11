@@ -81,6 +81,7 @@ def load_design(language):
     source = source.replace('__I18N__', json.dumps(translations, ensure_ascii=True,
                                                   separators=(',', ':')).replace('<', '\\u003c'))
     source = source.replace('lang="ru"', f'lang="{locale(language)}"')
+    source = re.sub(r"[\n\r]+\s*", "", source)
     raw = source.encode()
     if len(raw) > 32768 or len(zlib.compress(raw, 9)) > 4096:
         raise ValueError(f'Widget HTML exceeds Telegram size limits: {len(raw)} raw / {len(zlib.compress(raw, 9))} compressed')
