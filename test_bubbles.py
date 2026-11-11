@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import shlex
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -171,6 +172,39 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         source = Path('bubbles/designs/default/progress.html').read_text()
         self.assertLess(source.index('id="fill"'),source.index('id="progress-hint"'))
         self.assertLess(source.index('id="progress-hint"'),source.index('id="size"'))
+
+    def test_long_mp3_bitrate_fits_upload_budget(self):
+        self.assertEqual(main.mp3_bitrate(180),192)
+        rate=main.mp3_bitrate(3595.001)
+        self.assertEqual(rate,112)
+        self.assertLess(3595.001*rate*1000/8,main.MAX_UPLOAD_SIZE)
+        with self.assertRaises(main.MediaTooLarge):
+            main.mp3_bitrate(24*3600)
+
+    def test_mp3_encoding_sets_bitrate_with_and_without_cover(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            audio=Path(scratch)/'audio.webm';audio.write_bytes(b'audio')
+            cover=Path(scratch)/'cover.jpg';cover.write_bytes(b'cover')
+            output=Path(scratch)/'out.mp3'
+            commands=[]
+            def encode(command,*args):
+                commands.append(shlex.split(command));output.write_bytes(b'mp3');return 0
+            with patch.object(main,'media_duration',return_value=3595.001), patch.object(main,'run_ffmpeg',side_effect=encode):
+                for image in (str(cover),None):
+                    main.prepare_mp3(str(audio),image,str(output),{'title':'Track'})
+            for command in commands:
+                self.assertEqual(command[command.index('-b:a')+1],'112k')
+                self.assertIn('libmp3lame',command)
+            self.assertIn('attached_pic',commands[0])
+            self.assertIn('-vn',commands[1])
+
+    async def test_oversized_prepared_file_has_distinct_error(self):
+        entry=await self.card();await entry.begin(0,'mp3')
+        with patch.object(main,'download_media',AsyncMock(side_effect=main.MediaTooLarge('limit'))):
+            await main.download_and_send(self.context,self.source,self.items[0]['url'],'mp3',msg=entry)
+        self.assertEqual(entry.state['error'],'too_large')
+        self.assertIn('50',entry.state['problem'][3])
+        self.send.assert_not_awaited()
 
     def sequential_widget_ids(self):
         counter=0

@@ -10,6 +10,7 @@ import subprocess
 import ipaddress
 import socket
 import shutil
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from yandex_music import is_yandex_music_url, yandex_to_youtube
@@ -542,6 +543,46 @@ def format_has_video(fmt):
 # ---------------------------------------------------------------------------
 # Media download, conversion and Telegram delivery
 # ---------------------------------------------------------------------------
+class MediaTooLarge(Exception):
+    """Prepared media cannot fit Telegram's upload limit."""
+
+
+def mp3_bitrate(duration, max_size=MAX_UPLOAD_SIZE, artwork_size=0):
+    if not duration or not math.isfinite(duration) or duration <= 0:
+        return 192
+    # Reserve space for artwork, tags, MP3 headers and duration rounding.
+    budget = max(0, max_size - artwork_size - 256 * 1024) * .97
+    for rate in (192,160,128,112,96,80,64,56,48,40,32):
+        if duration * rate * 1000 / 8 <= budget:
+            return rate
+    raise MediaTooLarge('Audio is too long for the upload limit')
+
+
+def prepare_mp3(audio_path, thumb_path, output_path, info, progress_cb=None, max_size=MAX_UPLOAD_SIZE):
+    duration = media_duration(audio_path) or info.get('duration')
+    thumb_path = thumb_path if thumb_path and os.path.isfile(thumb_path) else None
+    bitrate = mp3_bitrate(duration, max_size, os.path.getsize(thumb_path) if thumb_path else 0)
+    command = ['ffmpeg','-y','-i',audio_path]
+    if thumb_path:
+        command += ['-i',thumb_path]
+    command += ['-map','0:a:0','-c:a','libmp3lame','-b:a',f'{bitrate}k']
+    if thumb_path:
+        command += ['-map','1:v:0','-c:v','mjpeg','-disposition:v','attached_pic']
+    else:
+        command += ['-vn']
+    command += ['-metadata',f"title={safe_meta(info.get('title',''))}",
+                '-metadata',f"artist={safe_meta(info.get('uploader',''))}",output_path]
+    try:
+        if run_ffmpeg(shlex.join(command),duration,progress_cb):
+            raise RuntimeError('Could not prepare media')
+        if downloaded_size(output_path) > max_size:
+            raise MediaTooLarge('The prepared file exceeds the upload limit')
+    except BaseException:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        raise
+
+
 async def download_media(url: str, format_choice: str, progress_cb=None):
     yt_dlp = get_yt_dlp()
     loop = asyncio.get_running_loop()
@@ -606,7 +647,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             elif direct_format:
                 best = direct_format
             else:
-                    raise Exception("File is too large: no audio under 50 MB")
+                    raise MediaTooLarge("File is too large: no audio under 50 MB")
 
             # скачиваем thumbnail
             thumb_url = info.get("thumbnail")
@@ -669,7 +710,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
 
                 if downloaded_size(final_m4a) > max_size:
                     os.remove(final_m4a)
-                    raise Exception("The prepared file exceeds the 50 MB limit")
+                    raise MediaTooLarge("The prepared file exceeds the 50 MB limit")
 
                 # возвращаем M4A
                 return final_m4a, info
@@ -691,31 +732,13 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                 _hook({'status':'preparing', 'detail':'transfer'})
                 ydl_a.download([url])
 
-            # создаём MP3 с обложкой
-            if thumb_path:
-                title = safe_meta(info.get("title", ""))
-                artist = safe_meta(info.get("uploader", ""))
-                cmd = shlex.join([
-                    'ffmpeg', '-y', '-i', audio_path, '-i', thumb_path,
-                    '-metadata', f'title={title}',
-                    '-metadata', f'artist={artist}',
-                    '-metadata:s:v', 'title=Album cover',
-                    '-metadata:s:v', 'comment=Cover (front)', output_path,
-                ])
-            else:
-                cmd = f'ffmpeg -y -i "{audio_path}" -c:a libmp3lame -b:a 192k "{output_path}"'
-
-            if run_ffmpeg(cmd, info.get('duration'), _hook):
-                raise RuntimeError('Could not prepare media')
-
-            if downloaded_size(output_path) > max_size:
-                os.remove(output_path)
-                raise Exception("The prepared file exceeds the 50 MB limit")
-
-            try: os.remove(audio_path)
-            except: pass
-            try: os.remove(thumb_path)
-            except: pass
+            try:
+                prepare_mp3(audio_path, thumb_path, output_path, info, _hook, max_size)
+            finally:
+                for temporary in (audio_path, thumb_path):
+                    if temporary:
+                        try: os.remove(temporary)
+                        except OSError: pass
 
             return output_path, info
 
@@ -790,7 +813,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
 
                 if downloaded_size(output_path) > max_size:
                     os.remove(output_path)
-                    raise Exception("The prepared file exceeds the 50 MB limit")
+                    raise MediaTooLarge("The prepared file exceeds the 50 MB limit")
                 return output_path, info
 
             videos = [
@@ -900,7 +923,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
 
             if downloaded_size(output_path) > max_size:
                 os.remove(output_path)
-                raise Exception("The prepared file exceeds the 50 MB limit")
+                raise MediaTooLarge("The prepared file exceeds the 50 MB limit")
 
             # удаляем временные файлы
             try: os.remove(video_path)
@@ -1025,7 +1048,12 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
         await progress_hook.flush()
     except Exception as e:
         print(f"Download error: {e}")
-        if getattr(msg, 'is_bubble', False) and 'video is not available' in str(e).lower():
+        if isinstance(e, MediaTooLarge):
+            if getattr(msg, 'is_bubble', False):
+                await msg.error('too_large')
+            else:
+                await edit_text_retry(msg, words['too_large_plain'])
+        elif getattr(msg, 'is_bubble', False) and 'video is not available' in str(e).lower():
             await msg.error('unavailable')
         else:
             await edit_text_retry(msg, words["source_failed"])
