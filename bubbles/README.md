@@ -1,6 +1,6 @@
 # HTMLBubbles
 
-The UI is separate from download/extraction code. Python uses PTB's forward-compatible `do_api_request` and reads `widget_query` from `Update.api_kwargs` on PTB 22.5. No framework upgrade or new dependency is required.
+The UI is separate from download/extraction code. Python uses PTB's forward-compatible `do_api_request` and reads `widget_query` from `Update.api_kwargs` on PTB 22.5. PTB 22.5 is supported; Pillow handles covers, and yt-dlp[default] supplies the matching YouTube EJS solver.
 
 ## Editing design
 
@@ -9,7 +9,7 @@ Edit `designs/default/`:
 - `bubble.html` — the shared document shell and view containers;
 - `format.html`, `search.html`, `progress.html`, `error.html` — individual screens;
 - `styles.css` — typography, spacing, theme-aware colors;
-- `widget.js` — rendering state, local format selection, and button actions.
+- `widget.js` — rendering state, track selection, and direct download actions.
 
 The header uses normal sentence case, system typography and a secondary color. The app's blue/navy fallback colors are retained; Telegram theme variables take precedence for readability in users' chat themes.
 
@@ -38,7 +38,7 @@ TELEGRAM_BOT_TOKEN=123456:offline-test python -m unittest -v test_bubbles test_y
 - `/bubbles` enables cards for the user; `/plain` switches to the original text/keyboard path.
 - Groups use the original UI. If `sendWidget` or design validation fails, the request falls back to text/inline buttons. Widget messages themselves have **no caption or inline keyboard**; older clients can opt out with `/plain`. All recording details and errors are drawn inside the widget.
 - Search shows all eight real results as a compact flat list, rather than buttons or pages. Titles/artists retain their full labels when the state budget allows; unusually long labels are trimmed to fit. Full metadata and URLs remain on the server. Metadata is rendered with `textContent`. The widget has no inner scrollbar: Telegram reserves vertical dragging for the chat and clips widget content above 600 px, so the eight compact rows are laid out to fit.
-- Format, progress and errors share one immutable HTML document, switching views through `chat_data`. A plain URL shows two direct download actions (audio/video), without an intermediate selector. After delivery, progress is replaced by a useful summary: cover, title, artist, duration, actual file format and file size. The actual audio/video/document is sent through the existing native API.
+- Format, progress and errors share one immutable HTML document, switching views through `chat_data`. A plain URL shows two direct download actions (audio/video), without an intermediate selector. After confirmed delivery, the loading widget is deleted and only the native file remains. The actual audio/video/document is sent through the existing native API.
 - The problem states are expired card, empty search, unavailable source, failed delivery, and unconfirmed delivery (check the chat before manually resending). “Change search / Send another link” requests a native ForceReply; widgets cannot open a keyboard themselves.
 - Query ownership is checked against private chat, sender, and original message. Formats and result indices are checked against server state. A query acknowledgement is attempted within four seconds; a failed or timed-out acknowledgement does not cancel the validated job. Concurrent widget jobs for one user are rejected. Widget control requests have short timeouts independent of long media uploads.
 - No playlists, quality selector, cancellation or Mini App is added. Existing photo-post handlers keep their existing behavior.
@@ -56,6 +56,8 @@ https://core.telegram.org/bots/api#sendwidget
 
 ## Covers and delivery safety
 
-`thumbnails.py` fetches a thumbnail from actual media metadata, bounds its body and pixel count, crops/resizes it with Pillow, and encodes WebP. Network destinations must be public HTTPS addresses; redirects are checked too. An unavailable image leaves a decorative placeholder without blocking download. All eight search miniatures share a small WebP atlas in a separate 1024-byte `public_data` object. This avoids inflating the 4096-byte compressed HTML or the 1024-byte `chat_data`. Larger individual covers are cached on the server and the selected cover is pushed when downloading begins. The progress card keeps the cover during download, conversion and upload, and the completed summary retains it.
+`thumbnails.py` fetches a thumbnail from actual media metadata, bounds its body and pixel count, crops/resizes it with Pillow, and encodes WebP. Network destinations must be public HTTPS addresses; redirects are checked too. An unavailable image leaves a decorative placeholder without blocking download. All eight search miniatures share a small WebP atlas in a separate 1024-byte `public_data` object. This avoids inflating the 4096-byte compressed HTML or the 1024-byte `chat_data`. Larger individual covers are cached on the server and the selected cover is pushed when downloading begins. The progress card keeps the cover during download, conversion and upload, and the completed widget is removed after confirmed delivery.
 
-`delivery.py` does not blindly retry media uploads after timeouts, connection-read errors, or bad-gateway responses: Telegram may already have delivered the file. Such outcomes show an unconfirmed-delivery screen and require an explicit manual retry. Only explicit flood-wait rejections and failures before connection establishment can retry automatically. Successful file delivery is not converted into a failed-delivery prompt by a thumbnail/summary-refresh error.
+`delivery.py` does not blindly retry media uploads after timeouts, connection-read errors, or bad-gateway responses: Telegram may already have delivered the file. Such outcomes show an unconfirmed-delivery screen and require an explicit manual retry. Only explicit flood-wait rejections and failures before connection establishment can retry automatically. A failure to remove a completed widget never restarts media delivery.
+
+The loading card uses the same small square artwork to the left of the recording title as the search list. During upload the center reads “Отправка” / “Sending”, instead of an arrow.

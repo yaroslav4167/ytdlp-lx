@@ -85,6 +85,14 @@
       "Telegram did not confirm delivery. Check the chat before trying again: another attempt may create a duplicate.",
       "Send again",
       "resend"
+    ],
+    "unavailable": [
+      "Recording unavailable",
+      "!",
+      "This recording is unavailable",
+      "YouTube reports that this recording is unavailable. Choose another result or send a different link.",
+      "Try another search",
+      "input"
     ]
   },
   "processing": "⏳ Processing...",
@@ -102,5 +110,6 @@
   "sending_plain": "📤 Sending file...",
   "speed_plain": "Speed",
   "remaining_plain": "Remaining",
-  "download_error_plain": "❌ Download error."
+  "download_error_plain": "❌ Download error.",
+  "upload": "Sending"
 }

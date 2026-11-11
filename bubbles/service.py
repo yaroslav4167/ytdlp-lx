@@ -118,6 +118,7 @@ class Bubble:
         self.covers = {}
         self.cover_atlas = None
         self.summary = {}
+        self.deleted = False
         self.published_covers = None
 
     def search_results(self):
@@ -232,8 +233,22 @@ class Bubble:
         return self
 
     async def delete(self):
-        # Keep completed widgets visible; send_audio/video remains a native file.
-        return None
+        if self.deleted:
+            return
+        for attempt in range(2):
+            try:
+                await self.context.bot.delete_message(chat_id=self.chat_id, message_id=self.message_id,
+                    connect_timeout=3, read_timeout=4, write_timeout=4, pool_timeout=1)
+                self.deleted = True
+                return
+            except Exception as exception:
+                if 'message to delete not found' in str(exception).lower():
+                    self.deleted = True
+                    return
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                else:
+                    LOG.warning('Could not remove completed widget (%s)', type(exception).__name__)
 
     def forget_file(self, remove=False):
         if self.file_timer:
@@ -280,18 +295,10 @@ class Bubble:
 
     async def complete(self):
         self.forget_file()
-        self.state = dict(view='progress',stage='done',percent=100,cover_index=self.selected,
-                          **(self.summary or {k:v for k,v in self.state.items()
-                             if k in ('title','artist','duration','format','size')}))
-        try:
-            await self.publish()
-            # Upgrade artwork only after delivery; failure must never suggest resending a delivered file.
-            cover = self.covers.get(self.selected) or await thumbnail(self.items[self.selected].get('thumbnail'), hero=True)
-            if cover:
-                self.covers[self.selected] = cover
-                await self.publish()
-        except Exception as exception:
-            LOG.warning('Summary refresh failed; file already delivered (%s)', type(exception).__name__)
+        self.state = {'view':'progress', 'stage':'done'}
+        await self.delete()
+        self.covers.clear()
+        self.cover_atlas = None
 
 
 class BubbleService:
