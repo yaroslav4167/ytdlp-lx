@@ -236,6 +236,7 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(image.width,32)
         self.assertLessEqual(len(raw),738)
         self.assertLessEqual(len(state_json({'7':cover}).encode()),1024)
+        self.assertLessEqual(len(state_json([16,[[7,cover]]]).encode()),1024)
 
     async def test_progressive_artwork_uses_same_message_and_stops_on_download(self):
         entry=await self.card('search')
@@ -255,6 +256,40 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         with patch('bubbles.service.asyncio.sleep',AsyncMock()):
             await entry.replay_covers()
         self.bot.do_api_request.assert_not_awaited()
+
+    async def test_thumbnail_fetch_retries_and_uses_youtube_fallback(self):
+        from bubbles.thumbnails import fetch_thumbnail_data
+        import io
+        from PIL import Image
+        data=io.BytesIO();Image.new('RGB',(64,64),'red').save(data,format='PNG')
+        source='https://i.ytimg.com/vi/abcdefghijk/hq720.jpg'
+        with patch('bubbles.thumbnails.fetch_image',AsyncMock(side_effect=[asyncio.TimeoutError(),data.getvalue()])) as fetch:
+            result=await fetch_thumbnail_data(source)
+        self.assertEqual(result,data.getvalue())
+        self.assertEqual(fetch.await_args_list[1].args[0],'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg')
+        with patch('bubbles.thumbnails.fetch_image',AsyncMock(side_effect=[b'bad image',data.getvalue()])):
+            self.assertEqual(await fetch_thumbnail_data(source),data.getvalue())
+
+    async def test_missing_cover_can_be_recovered_by_acknowledged_reply(self):
+        entry=await self.card('search')
+        entry.items[2]['thumbnail']='https://example.com/cover.jpg'
+        pending=await self.dispatch('names|10')
+        self.assertEqual(json.loads(pending.await_args.args[0]),[10,[]])
+        self.assertEqual(entry.cover_repairs,{})
+        entry.artwork_ready.set()
+        image='data:image/webp;base64,recovered'
+        with patch('bubbles.service.thumbnail',AsyncMock(return_value=image)):
+            answer=await self.dispatch('names|10')
+            self.assertEqual(json.loads(answer.await_args.args[0]),[10,[]])
+            await asyncio.gather(*self.tasks)
+        answer=await self.dispatch('names|10')
+        payload=json.loads(answer.await_args.args[0])
+        self.assertEqual(payload,[11,[[2,image]]])
+        self.assertLessEqual(len(answer.await_args.args[0].encode()),1024)
+        self.assertEqual(entry.covers[2],image)
+        sends=[c for c in self.bot.do_api_request.await_args_list if c.kwargs['endpoint']=='sendWidget']
+        self.assertEqual(len(sends),1)
+        self.download.assert_not_awaited()
 
     def sequential_widget_ids(self):
         counter=0
