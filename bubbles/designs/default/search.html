@@ -1,5 +1,4 @@
 <div class="row spread"><span class="label" data-i18n="results"></span><span class="pill" id="count"></span></div>
 <h3 class="media-title"></h3><p class="muted" data-i18n="choose"></p>
-<div id="results"></div>
-<div class="row spread pager"><button id="prev" onclick="ask('page|'+(S.page-1))">←</button><span class="muted" id="page"></span><button id="next" onclick="ask('page|'+(S.page+1))">→</button></div>
+<div id="results" role="listbox"></div>
 <div class="actions"><button class="primary" id="search-audio" onclick="download(selected,'mp3')" data-i18n="audio"></button><button class="primary" id="search-video" onclick="download(selected,'mp4')" data-i18n="video"></button></div>

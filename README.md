@@ -125,3 +125,5 @@ Widget mode has no extra caption or native inline keyboard. A URL offers direct
 media metadata; after sending, the card becomes a recording summary. Unconfirmed
 media-upload outcomes are not automatically retried, preventing timeout-driven
 duplicate files; the card asks the user to check the chat before a manual resend.
+
+Search cards show all eight recordings as a flat list without pagination. The selected recording keeps its cover throughout downloading, conversion, sending and the final summary. Telegram does not support a scrollbar inside widgets; vertical gestures scroll the chat.

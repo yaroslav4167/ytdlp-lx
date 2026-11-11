@@ -4,7 +4,7 @@ No design markup lives here. Templates and locales are read for every new card.
 """
 import asyncio
 from collections import OrderedDict
-from .thumbnails import thumbnail
+from .thumbnails import thumbnail, search_thumbnails
 from .delivery import AmbiguousDelivery
 import json
 import logging
@@ -101,8 +101,8 @@ class Bubble:
         self.items, self.selected, self.format = items, 0, 'mp3'
         self.state = {'view': view, 'title': shorten(title, 120)}
         if view == 'search':
-            self.state.update(page=0, total=len(items))
-            self.search_page(0)
+            self.state.update(total=len(items))
+            self.search_results()
         elif items:
             self.state.update({k: v for k, v in items[0].items() if k in ('title', 'artist', 'duration', 'audio', 'video')})
             self.state['title'] = items[0]['title'] or shorten(title, 120) or self.words['recording']
@@ -116,28 +116,40 @@ class Bubble:
         self.lock = asyncio.Lock()
         self.published = None
         self.covers = {}
+        self.cover_atlas = None
         self.summary = {}
         self.published_covers = None
 
-    def search_page(self, page):
-        self.state['page'] = page
-        self.state['rows'] = [dict(i=i, t=shorten(v['title'], 90),
-                                  a=shorten(v['artist'], 40), d=v['duration'],
-                                  audio=v['audio'], video=v['video'])
-                              for i, v in enumerate(self.items) if page*3 <= i < page*3+3]
+    def search_results(self):
+        # Keep full labels whenever they fit; trim only to meet the 1024-byte state limit.
+        rows = [[i, v['title'], v['artist'], v['duration'],
+                 int(v['audio']) | (int(v['video']) << 1)]
+                for i, v in enumerate(self.items[:8])]
+        self.state['rows'] = rows
+        while len(json.dumps(self.state, ensure_ascii=False, separators=(',', ':')).encode()) > 1024:
+            fields = [(row, column, floor) for column, floor in ((2, 8), (1, 32))
+                      for row in rows if len(row[column].encode()) > floor]
+            if not fields:
+                raise ValueError('Search labels cannot fit widget state')
+            row, column, floor = max(fields, key=lambda f:len(f[0][f[1]].encode()))
+            row[column] = shorten(row[column], max(floor, len(row[column].encode())-8))
 
     def cover_indices(self):
-        if self.state['view'] == 'search':
-            return [r['i'] for r in self.state.get('rows', [])]
         return [self.selected] if self.items else []
 
     async def prepare_covers(self):
+        if self.state['view'] == 'search' and not self.state.get('error'):
+            self.cover_atlas, covers = await search_thumbnails([v.get('thumbnail') for v in self.items])
+            self.covers.update(covers)
+            return
         indices = [i for i in self.cover_indices() if i not in self.covers]
         values = await asyncio.gather(*(thumbnail(self.items[i].get('thumbnail'),
             hero=self.state['view'] != 'search') for i in indices))
         self.covers.update(zip(indices, values))
 
     def cover_data(self):
+        if self.state['view'] == 'search':
+            return state_json({'atlas':self.cover_atlas} if self.cover_atlas else {})
         return state_json({str(i):self.covers[i] for i in self.cover_indices() if self.covers.get(i)})
 
     async def publish(self):
@@ -274,7 +286,7 @@ class Bubble:
         try:
             await self.publish()
             # Upgrade artwork only after delivery; failure must never suggest resending a delivered file.
-            cover = await thumbnail(self.items[self.selected].get('thumbnail'), hero=True)
+            cover = self.covers.get(self.selected) or await thumbnail(self.items[self.selected].get('thumbnail'), hero=True)
             if cover:
                 self.covers[self.selected] = cover
                 await self.publish()
@@ -392,15 +404,6 @@ class BubbleService:
         if owner in self.busy_users:
             await answer(words['busy']); return
         parts = data.split('|')
-        if len(parts) == 2 and parts[0] == 'page' and parts[1].isascii() and parts[1].isdigit() and entry.state.get('view') == 'search' and not entry.state.get('error'):
-            page = int(parts[1])
-            if page*3 >= len(entry.items):
-                await answer(words['unavailable']); return
-            await answer('')
-            entry.search_page(page)
-            await entry.prepare_covers()
-            await entry.publish()
-            return
         if data == 'resend':
             if entry.state.get('error') not in ('send', 'uncertain') or not entry.filename or time.monotonic() >= entry.file_deadline or not Path(entry.filename).is_file():
                 entry.forget_file(remove=True)

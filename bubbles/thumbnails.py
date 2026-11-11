@@ -85,3 +85,48 @@ async def thumbnail(url, hero=False):
         return await asyncio.to_thread(encode_image, data, hero) if data else None
     except (ValueError, OSError, Image.DecompressionBombError, aiohttp.ClientError, asyncio.TimeoutError):
         return None
+
+
+def search_artwork(images):
+    """Eight compact covers share one WebP atlas in public_data; heroes stay server-side."""
+    decoded = []
+    heroes = {}
+    for index, data in enumerate(images):
+        image = None
+        if data:
+            try:
+                with Image.open(io.BytesIO(data)) as source:
+                    if source.width * source.height <= 16_000_000:
+                        image = source.convert('RGB')
+                heroes[index] = encode_image(data, hero=True) if image is not None else None
+            except (ValueError, OSError, Image.DecompressionBombError):
+                image = None
+        decoded.append(image)
+    if not any(image is not None for image in decoded):
+        return None, heroes
+    for size in (40, 32, 24, 20, 16, 12):
+        atlas = Image.new('RGB', (size*4, size*2), '#0b2d5c')
+        for index, image in enumerate(decoded):
+            if image is not None:
+                atlas.paste(ImageOps.fit(image, (size, size), method=Image.Resampling.LANCZOS),
+                            ((index % 4)*size, (index // 4)*size))
+        for quality in (25, 12, 5):
+            output = io.BytesIO()
+            atlas.save(output, format='WEBP', quality=quality, method=6)
+            if output.tell() <= 650:
+                return 'data:image/webp;base64,' + base64.b64encode(output.getvalue()).decode('ascii'), heroes
+    return None, heroes
+
+
+async def search_thumbnails(urls):
+    semaphore = asyncio.Semaphore(4)
+    async def fetch(url):
+        if not url:
+            return None
+        async with semaphore:
+            try:
+                return await fetch_image(url)
+            except (ValueError, OSError, aiohttp.ClientError, asyncio.TimeoutError):
+                return None
+    images = await asyncio.gather(*(fetch(url) for url in urls[:8]))
+    return await asyncio.to_thread(search_artwork, images)
