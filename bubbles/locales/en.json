@@ -1,10 +1,10 @@
 {
-  "ready": "Choose a format",
+  "ready": "Download recording",
   "audio_video": "Audio and video",
   "audio": "Audio",
   "video": "Video",
-  "download_audio": "Download audio ↓",
-  "download_video": "Download video ↓",
+  "download_audio": "Download audio",
+  "download_video": "Download video",
   "file_here": "The file will arrive in this chat",
   "results": "Search results",
   "found": "Found",
@@ -75,6 +75,14 @@
       "↥",
       "Could not send the file",
       "The file was downloaded but could not be delivered to Telegram. Retry without downloading again.",
+      "Send again",
+      "resend"
+    ],
+    "uncertain": [
+      "Delivery",
+      "↥",
+      "Check whether the file arrived",
+      "Telegram did not confirm delivery. Check the chat before trying again: another attempt may create a duplicate.",
       "Send again",
       "resend"
     ]

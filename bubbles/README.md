@@ -36,11 +36,11 @@ TELEGRAM_BOT_TOKEN=123456:offline-test python -m unittest -v test_bubbles test_y
 
 - Widgets are enabled by default in private chats. Set `BUBBLES_ENABLED=0` to make them opt-in.
 - `/bubbles` enables cards for the user; `/plain` switches to the original text/keyboard path.
-- Groups use the original UI. If `sendWidget` or design validation fails, the request falls back to text/inline buttons. Older clients can use each widget's caption and inline keyboard or opt out with `/plain`.
+- Groups use the original UI. If `sendWidget` or design validation fails, the request falls back to text/inline buttons. Widget messages themselves have **no caption or inline keyboard**; older clients can opt out with `/plain`. All recording details and errors are drawn inside the widget.
 - Search uses the bot's real eight results; only three compact rows are placed in state at once. All full URLs remain on the server. Metadata is rendered with `textContent`.
-- Format, progress and errors share one immutable HTML document, switching views through `chat_data`. A caption and fallback buttons are updated alongside status transitions. The actual audio/video/document is sent through the existing native API.
-- The four problem states are expired card, empty search, unavailable source, and failed file delivery. “Change search / Send another link” requests a native ForceReply; widgets cannot open a keyboard themselves.
-- Query ownership is checked against private chat, sender, and original message. Formats and result indices are checked against server state. A query is acknowledged before a background job starts; concurrent widget jobs for one user are rejected.
+- Format, progress and errors share one immutable HTML document, switching views through `chat_data`. A plain URL shows two direct download actions (audio/video), without an intermediate selector. After delivery, progress is replaced by a useful summary: cover, title, artist, duration, actual file format and file size. The actual audio/video/document is sent through the existing native API.
+- The problem states are expired card, empty search, unavailable source, failed delivery, and unconfirmed delivery (check the chat before manually resending). “Change search / Send another link” requests a native ForceReply; widgets cannot open a keyboard themselves.
+- Query ownership is checked against private chat, sender, and original message. Formats and result indices are checked against server state. A query acknowledgement is attempted within four seconds; a failed or timed-out acknowledgement does not cancel the validated job. Concurrent widget jobs for one user are rejected. Widget control requests have short timeouts independent of long media uploads.
 - No playlists, quality selector, cancellation or Mini App is added. Existing photo-post handlers keep their existing behavior.
 
 ## File and state lifecycle
@@ -53,3 +53,9 @@ A file whose delivery failed is retained for **10 minutes** for “Send again”
 
 https://core.telegram.org/bots/widgets
 https://core.telegram.org/bots/api#sendwidget
+
+## Covers and delivery safety
+
+`thumbnails.py` fetches a thumbnail from actual media metadata, bounds its body and pixel count, crops/resizes it with Pillow, and encodes WebP. Network destinations must be public HTTPS addresses; redirects are checked too. An unavailable image leaves a decorative placeholder without blocking download. The selected page's images are carried as data URLs in a separate 1024-byte `public_data` object, rather than inflating the 4096-byte compressed HTML or the 1024-byte `chat_data`. Pagination loads at most three images; a completed summary can upgrade its selected image to a larger cover.
+
+`delivery.py` does not blindly retry media uploads after timeouts, connection-read errors, or bad-gateway responses: Telegram may already have delivered the file. Such outcomes show an unconfirmed-delivery screen and require an explicit manual retry. Only explicit flood-wait rejections and failures before connection establishment can retry automatically. Successful file delivery is not converted into a failed-delivery prompt by a thumbnail/summary-refresh error.

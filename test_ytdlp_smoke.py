@@ -69,7 +69,8 @@ class FakeBot:
     async def send_video(self, **kwargs):
         self.video_attempts += 1
         if self.video_attempts == 1:
-            raise RuntimeError("simulated Telegram timeout")
+            from telegram.error import RetryAfter
+            raise RetryAfter(0)
         assert kwargs["video"] is not None
         return object()
 
