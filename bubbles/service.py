@@ -415,7 +415,7 @@ class BubbleService:
             words = strings(language)
             payload = {'chat_id':source.chat_id, 'html':load_design(language),
                        'allow_queries':True, 'chat_data':state_json({
-                           'view':'progress', 'stage':'processing', 'percent':None,
+                           'view':'processing', 'stage':'processing', 'percent':None,
                            'stage_title':words['processing_title'], 'title':words['waiting']})}
             if getattr(source,'message_thread_id',None):
                 payload['message_thread_id']=source.message_thread_id
