@@ -94,11 +94,13 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         cover = encode_image(buffer.getvalue())
         self.assertTrue(cover.startswith('data:image/webp;base64,'))
         entry = await self.card('search')
-        entry.covers = {i:cover for i in range(8)}
+        from bubbles.thumbnails import search_artwork
+        atlas, heroes = search_artwork([buffer.getvalue()]*8)
+        entry.cover_atlas=atlas;entry.covers.update(heroes)
         self.assertLessEqual(len(entry.cover_data().encode()),1024)
         self.assertNotIn('thumbnail',state_json(entry.state))
-        entry.search_page(2)
-        self.assertEqual(set(json.loads(entry.cover_data())),{'6','7'})
+        self.assertEqual(set(json.loads(entry.cover_data())),{'atlas'})
+        self.assertEqual(len(heroes),8)
 
     async def test_summary_refresh_failure_does_not_become_delivery_failure(self):
         entry=await self.card();await entry.begin(0,'mp3')
@@ -172,16 +174,28 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.card())
         self.assertFalse(self.service.entries)
 
-    async def test_real_metadata_and_bounded_search_page(self):
-        self.items=[item('https://example.com/'+str(i),{'title':'😀'*200,'uploader':'Я'*200}) for i in range(8)]
+    async def test_all_eight_results_fit_in_one_state(self):
+        self.items=[item('https://example.com/'+str(i),{'title':'😀'*200,'uploader':'Я'*200,'duration':999999}) for i in range(8)]
         entry=await self.card('search')
         self.assertIsNotNone(entry)
         self.assertLessEqual(len(state_json(entry.state).encode()),1024)
-        await self.dispatch('page|2')
-        self.assertEqual([r['i'] for r in entry.state['rows']],[6,7])
+        self.assertEqual([row[0] for row in entry.state['rows']],list(range(8)))
+        self.assertEqual(entry.state['total'],8)
         self.assertNotIn('https://',state_json(entry.state))
-        await self.dispatch('page|99')
-        self.assertEqual(entry.state['page'],2)
+        self.assertNotIn('page',entry.state)
+
+    async def test_search_preserves_full_titles_when_budget_allows(self):
+        self.items[0]['title']='A readable full recording title '+('x'*70)
+        entry=await self.card('search')
+        self.assertEqual(entry.state['rows'][0][1],self.items[0]['title'])
+
+    async def test_loading_keeps_selected_recording_cover(self):
+        entry=await self.card('search')
+        entry.covers[6]='data:image/webp;base64,example'
+        await entry.begin(6,'mp3')
+        self.assertEqual(json.loads(entry.cover_data()),{'6':entry.covers[6]})
+        self.assertEqual(entry.state['cover_index'],6)
+        self.assertIn('data-cover', (Path('bubbles/designs/default/progress.html')).read_text())
 
     async def test_ownership_and_invalid_format(self):
         await self.card()

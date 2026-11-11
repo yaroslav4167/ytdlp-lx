@@ -963,8 +963,9 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
             return
         service.busy_users.add(owner)
         try:
+            info = await probe_url(url) or {}
             card = await service.send(context, source_message,
-                [bubble_item(url)], title='', view='progress')
+                [bubble_item(url, info)], title=info.get('title') or '', view='progress')
         except BaseException:
             service.busy_users.discard(owner)
             raise
