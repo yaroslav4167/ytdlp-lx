@@ -360,7 +360,7 @@ def make_progress_hook(msg, loop, words=None):
 
     def progress_hook(d):
         try:
-            asyncio.run_coroutine_threadsafe(progress_hook_async(d), loop)
+            asyncio.run_coroutine_threadsafe(progress_hook_async(dict(d)), loop)
         except Exception as e:
             print(f"Progress task error: {e}")
 

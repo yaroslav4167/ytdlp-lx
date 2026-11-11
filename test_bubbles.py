@@ -57,6 +57,34 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('__I18N__',source)
             self.assertIn(strings(code)['download_audio'],source)
 
+    async def test_progress_keeps_latest_sample_and_stops_after_sending(self):
+        entry = await self.card()
+        await entry.begin(0, 'mp3')
+        for percent in range(1, 100):
+            await entry.update_progress({'status':'downloading', 'downloaded_bytes':percent, 'total_bytes':100})
+        self.assertEqual(entry.state['percent'], 99)
+        await entry.progress_task
+        published = json.loads(self.bot.do_api_request.await_args.kwargs['api_kwargs']['chat_data'])
+        self.assertEqual(published['percent'], 99)
+        await entry.update_progress({'status':'downloading', 'downloaded_bytes':100, 'total_bytes':100})
+        await entry.edit_text(entry.words['sending_plain'])
+        await entry.update_progress({'status':'downloading', 'downloaded_bytes':1, 'total_bytes':100})
+        await entry.progress_task
+        self.assertEqual(entry.state['stage'], 'sending')
+        self.assertLess(self.bot.do_api_request.await_count, 8)
+
+    async def test_progress_unknown_and_estimated_totals(self):
+        entry = await self.card()
+        await entry.begin(0, 'mp3')
+        self.assertIsNone(entry.state['percent'])
+        await entry.update_progress({'status':'downloading', 'downloaded_bytes':1024})
+        self.assertIsNone(entry.state['percent'])
+        self.assertTrue(entry.state['size'])
+        await entry.update_progress({'status':'downloading', 'downloaded_bytes':100, 'total_bytes_estimate':300})
+        self.assertEqual(entry.state['percent'], 33.3)
+        self.assertTrue(entry.state['approximate'])
+        await entry.progress_task
+
     def sequential_widget_ids(self):
         counter=0
         def response(endpoint,api_kwargs,**kwargs):

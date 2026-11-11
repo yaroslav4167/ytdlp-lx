@@ -164,6 +164,7 @@ class Bubble:
         self.file_timer = None
         self.busy = False
         self.last_progress = 0
+        self.progress_task = None
         self.lock = asyncio.Lock()
         self.published = None
         self.covers = {}
@@ -241,25 +242,21 @@ class Bubble:
         media = self.items[index]
         self.state = {'view': 'progress', 'title': media['title'] or self.words['recording'],
                       'artist': media['artist'], 'duration': media['duration'],
-                      'format': fmt, 'stage': 'downloading', 'percent': 0, 'cover_index':index}
+                      'format': fmt, 'stage': 'downloading', 'percent': None, 'cover_index':index}
         self.last_progress = 0
         await self.publish()
 
     async def update_progress(self, data):
         if self.state.get('error') or self.state.get('stage') in ('sending', 'done'):
             return
-        now = time.monotonic()
-        if now-self.last_progress < 1 and data.get('status') in ('downloading', 'converting'):
-            return
-        self.last_progress = now
         stage = data.get('status')
         if stage == 'error':
             await self.error('source')
             return
         if stage == 'finished':
-            self.state.update(stage='converting', percent=0, eta='', speed='')
+            self.state.update(stage='converting', percent=None, eta='', speed='', size='', approximate=False)
         elif stage == 'converting':
-            self.state.update(stage='converting', percent=round(data.get('percent', 0)), eta='', speed='')
+            self.state.update(stage='converting', percent=round(data.get('percent', 0), 1), eta='', speed='', approximate=False)
         elif stage == 'downloading':
             total = data.get('total_bytes') or data.get('total_bytes_estimate') or 0
             downloaded = data.get('downloaded_bytes') or 0
@@ -268,11 +265,27 @@ class Bubble:
                 percent = 0
             speed = data.get('speed') or 0
             eta = data.get('eta')
-            self.state.update(stage='downloading', percent=round(percent),
-                size=f'{downloaded/1048576:.1f} / {total/1048576:.1f} MiB' if total else '',
+            self.state.update(stage='downloading', percent=round(percent, 1) if total else None,
+                approximate=not bool(data.get('total_bytes')) and bool(total),
+                size=f'{downloaded/1048576:.1f} / {total/1048576:.1f} MiB' if total else f'{downloaded/1048576:.1f} MiB',
                 speed=f'{speed/1048576:.1f} MiB/s' if speed else '',
                 eta=self.words['eta'].format(seconds=max(0, int(eta))) if eta else '')
-        await self.publish()
+        # Keep every latest sample, but only one publisher in flight.
+        # In particular, never drop the final sample inside a throttle window.
+        if not self.progress_task or self.progress_task.done():
+            self.progress_task = asyncio.create_task(self.publish_progress())
+
+    async def publish_progress(self):
+        while not self.deleted and not self.state.get('error') and self.state.get('stage') not in ('sending', 'done'):
+            await asyncio.sleep(max(0, .5 - (time.monotonic() - self.last_progress)))
+            if self.deleted or self.state.get('error') or self.state.get('stage') in ('sending', 'done'):
+                return
+            before = state_json(self.state)
+            self.last_progress = time.monotonic()
+            await self.publish()
+            await asyncio.sleep(.5)
+            if state_json(self.state) == before:
+                return
 
     async def edit_text(self, text, **kwargs):
         if text.startswith(('Download error:', 'Could not prepare')) or text in (self.words['source_failed'], self.words['prepare_failed']):
