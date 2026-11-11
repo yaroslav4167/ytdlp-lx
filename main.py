@@ -564,10 +564,12 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             'add_metadata': True,
         }
 
+        _hook({'status':'preparing', 'detail':'metadata'})
         # Получаем список форматов
         ydl_probe = ProxyRetryYoutubeDL(ydl_options({'quiet': True}))
         info = ydl_probe.extract_info(url, download=False)
 
+        _hook({'status':'preparing', 'detail':'formats'})
         formats = info.get("formats", [])
         max_size = MAX_UPLOAD_SIZE
 
@@ -609,6 +611,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             # скачиваем thumbnail
             thumb_url = info.get("thumbnail")
             if thumb_url:
+                _hook({'status':'preparing', 'detail':'artwork'})
                 try:
                     import requests
                     r = requests.get(thumb_url, timeout=(3, 5))
@@ -643,6 +646,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                     'progress_hooks': [_hook],
                     'max_filesize': max_size,
                 })) as ydl_a:
+                    _hook({'status':'preparing', 'detail':'transfer'})
                     ydl_a.download([url])
 
                 # добавляем только метаданные
@@ -684,6 +688,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                 'progress_hooks': [_hook],
                 'max_filesize': max_size,
             })) as ydl_a:
+                _hook({'status':'preparing', 'detail':'transfer'})
                 ydl_a.download([url])
 
             # создаём MP3 с обложкой
@@ -767,6 +772,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                     'progress_hooks': [_hook],
                     'max_filesize': max_size,
                 })) as ydl_direct:
+                    _hook({'status':'preparing', 'detail':'transfer'})
                     ydl_direct.download([url])
 
                 if direct_ext == 'mp4':
@@ -851,6 +857,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                 'progress_hooks': [_hook],
                 'max_filesize': max_size,
             })) as ydl_v:
+                _hook({'status':'preparing', 'detail':'transfer'})
                 ydl_v.download([url])
 
             download_part = 'audio'
@@ -861,6 +868,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                 'progress_hooks': [_hook],
                 'max_filesize': max_size,
             })) as ydl_a:
+                _hook({'status':'preparing', 'detail':'transfer'})
                 ydl_a.download([url])
 
             # объединяем вручную

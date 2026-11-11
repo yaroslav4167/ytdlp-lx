@@ -150,6 +150,28 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.state['percent'], 25)
         await entry.progress_task
 
+    async def test_progress_detail_is_localized_and_tracks_current_work(self):
+        for language in ('ru', 'en'):
+            self.source.from_user.language_code = language
+            entry = await self.card()
+            await entry.begin(0, 'mp3')
+            details = strings(language)['progress_details']
+            self.assertEqual(entry.state['detail'], details['metadata'])
+            for step in ('metadata','formats','artwork','transfer'):
+                await entry.update_progress({'status':'preparing','detail':step})
+                self.assertEqual(entry.state['detail'], details[step])
+            await entry.update_progress({'status':'downloading','part':'audio','downloaded_bytes':20,'total_bytes':100})
+            self.assertEqual(entry.state['detail'], details['audio'])
+            await entry.update_progress({'status':'converting','percent':30})
+            self.assertEqual(entry.state['detail'], details['convert'])
+            await entry.edit_text(entry.words['sending_plain'])
+            self.assertEqual(entry.state['detail'], details['sending'])
+            self.assertLessEqual(len(state_json(entry.state).encode()),1024)
+            await entry.progress_task
+        source = Path('bubbles/designs/default/progress.html').read_text()
+        self.assertLess(source.index('id="fill"'),source.index('id="progress-hint"'))
+        self.assertLess(source.index('id="progress-hint"'),source.index('id="size"'))
+
     def sequential_widget_ids(self):
         counter=0
         def response(endpoint,api_kwargs,**kwargs):

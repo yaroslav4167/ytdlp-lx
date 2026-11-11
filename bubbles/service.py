@@ -244,7 +244,7 @@ class Bubble:
         self.state = {'view': 'progress', 'title': media['title'] or self.words['recording'],
                       'artist': media['artist'], 'duration': media['duration'],
                       'format': fmt, 'stage': 'downloading', 'stage_title': self.words['waiting_source'],
-                      'percent': None, 'cover_index':index}
+                      'percent': None, 'cover_index':index, 'detail':self.words['progress_details']['metadata']}
         self.last_progress = 0
         await self.publish()
 
@@ -259,7 +259,10 @@ class Bubble:
         if stage == 'error':
             await self.error('source')
             return
-        if stage == 'converting':
+        if stage == 'preparing':
+            self.state.update(detail=self.words['progress_details'].get(data.get('detail'),
+                              self.words['waiting_source']), percent=None, size='', speed='', eta='')
+        elif stage == 'converting':
             if self.state.get('stage') == 'downloading':
                 # Flush the real final byte count before replacing a short download
                 # with conversion. Slow Telegram edits must not erase this phase.
@@ -267,7 +270,7 @@ class Bubble:
             self.state.pop('stage_title', None)
             percent = data.get('percent')
             self.state.update(stage='converting', percent=round(percent, 1) if percent is not None else None,
-                              eta='', speed='', size='', part='')
+                              eta='', speed='', size='', part='', detail=self.words['progress_details']['convert'])
         elif stage in ('downloading', 'finished'):
             self.state.pop('stage_title', None)
             # Estimates change between HLS fragments and can report 100% too early.
@@ -278,7 +281,9 @@ class Bubble:
                 percent = 0
             speed = data.get('speed') or 0
             eta = data.get('eta')
+            detail = 'finished' if stage == 'finished' else data.get('part') or 'download'
             self.state.update(stage='downloading', percent=round(percent, 1) if total else None,
+                detail=self.words['progress_details'].get(detail,self.words['progress_details']['download']),
                 part=self.words.get(data.get('part'), '') if data.get('part') else '',
                 size=f'{downloaded/1048576:.1f} / {total/1048576:.1f} MiB' if total else f'{downloaded/1048576:.1f} MiB',
                 speed=f'{speed/1048576:.1f} MiB/s' if speed else '',
@@ -311,7 +316,8 @@ class Bubble:
         elif 'Sending file' in text or text == self.words['sending_plain']:
             self.state.pop('error', None)
             self.state.pop('stage_title', None)
-            self.state.update(stage='sending', percent=None, eta='', speed='', size='', part='')
+            self.state.update(stage='sending', percent=None, eta='', speed='', size='', part='',
+                              detail=self.words['progress_details']['sending'])
             await self.publish()
         return self
 
