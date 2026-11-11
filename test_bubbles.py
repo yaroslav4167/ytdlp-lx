@@ -206,21 +206,20 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('50',entry.state['problem'][3])
         self.send.assert_not_awaited()
 
-    async def test_full_titles_are_present_without_selection_requests(self):
+    async def test_full_names_load_into_one_existing_search_card(self):
         self.sequential_widget_ids()
         title='A long recording title — '*15
         self.items[0]=item('https://example.com/long',{'title':title})
-        await self.card('search')
-        entries=list(self.service.entries.values())
-        rows=[row for entry in entries for row in entry.state['rows']]
-        self.assertEqual(rows[0][1],title)
-        self.assertEqual(len(rows),8)
+        entry=await self.card('search')
+        self.assertEqual(len(self.service.entries),1)
+        self.assertEqual(len(entry.state['rows']),8)
+        answer=AsyncMock()
+        await self.service.dispatch(self.context,123,{'id':123,'type':'private'},entry.message_id,'names|0',answer,'ru')
+        payload=json.loads(answer.await_args.args[0])
+        self.assertEqual(payload[1][0],[0,title])
+        self.assertLessEqual(len(answer.await_args.args[0].encode()),1024)
         self.download.assert_not_awaited()
-        self.assertGreater(len(entries),1)
-        second=entries[1]
-        await self.service.dispatch(self.context,123,{'id':123,'type':'private'},second.message_id,'dl|0|mp3',AsyncMock(),'ru')
-        await asyncio.gather(*self.tasks)
-        self.assertEqual(self.download.await_args.args[2],second.items[0]['url'])
+        self.assertEqual(len([c for c in self.bot.do_api_request.await_args_list if c.kwargs['endpoint']=='sendWidget']),1)
 
     def sequential_widget_ids(self):
         counter=0
@@ -460,18 +459,23 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.card())
         self.assertFalse(self.service.entries)
 
-    async def test_all_eight_full_titles_fit_across_bounded_cards(self):
+    async def test_all_eight_long_names_use_one_card_and_bounded_replies(self):
         self.sequential_widget_ids()
         self.items=[item('https://example.com/'+str(i),{'title':'😀'*200,'uploader':'Я'*200,'duration':999999}) for i in range(8)]
         entry=await self.card('search')
-        self.assertIsNotNone(entry)
-        entries=list(self.service.entries.values())
-        self.assertEqual(sum(len(e.state['rows']) for e in entries),8)
-        for card in entries:
-            self.assertLessEqual(len(state_json(card.state).encode()),1024)
-            self.assertEqual(card.state['rows'][0][1],'😀'*200)
-            self.assertNotIn('https://',state_json(card.state))
-            self.assertNotIn('page',card.state)
+        self.assertEqual(len(self.service.entries),1)
+        self.assertEqual(len(entry.state['rows']),8)
+        self.assertLessEqual(len(state_json(entry.state).encode()),1024)
+        cursor=0;names=[]
+        while cursor<8:
+            answer=AsyncMock()
+            await self.service.dispatch(self.context,123,{'id':123,'type':'private'},entry.message_id,f'names|{cursor}',answer,'ru')
+            raw=answer.await_args.args[0]
+            self.assertLessEqual(len(raw.encode()),1024)
+            next_cursor,rows=json.loads(raw)
+            self.assertGreater(next_cursor,cursor)
+            cursor=next_cursor;names+=rows
+        self.assertEqual(names,[[i,'😀'*200] for i in range(8)])
 
     async def test_search_preserves_full_titles_when_budget_allows(self):
         self.items[0]['title']='A readable full recording title '+('x'*70)
