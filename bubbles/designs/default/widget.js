@@ -56,7 +56,7 @@ function render(){
     images();
   }else if(view==='search'){search();}else{
     var stage=S.stage||'downloading',names={downloading:I.download,converting:I.convert,sending:I.send,done:I.done};
-    text('stage',names[stage]+(S.part?' · '+S.part:''));text('filetype',(S.format||'').toUpperCase());
+    text('stage',S.stage_title||names[stage]+(S.part?' · '+S.part:''));text('filetype',(S.format||'').toUpperCase());
     var percent=Math.max(0,Math.min(100,Number(S.percent)||0));text('percent',stage==='done'?'✓':stage==='sending'?I.upload:S.percent==null?'…':percent+'%');
     el('fill').style.width=percent+'%';el('fill').className=S.percent==null?'waiting':'';text('eta',S.eta);text('size',S.size);text('speed',S.speed);
     var active={downloading:0,converting:1,sending:2,done:3}[stage];

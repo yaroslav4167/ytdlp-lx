@@ -358,12 +358,19 @@ def make_progress_hook(msg, loop, words=None):
         except Exception as e:
             print(f"Progress update error: {e}")
 
+    pending = {'latest': None}
+
     def progress_hook(d):
         try:
-            asyncio.run_coroutine_threadsafe(progress_hook_async(dict(d)), loop)
+            pending['latest'] = asyncio.run_coroutine_threadsafe(progress_hook_async(dict(d)), loop)
         except Exception as e:
             print(f"Progress task error: {e}")
 
+    async def flush():
+        if pending['latest'] is not None:
+            await asyncio.wrap_future(pending['latest'])
+
+    progress_hook.flush = flush
     return progress_hook
 
 def run_ffmpeg(command, duration, progress_hook=None):
@@ -1007,6 +1014,7 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
     progress_hook = make_progress_hook(msg, loop, context_words(context))
     try:
         filename, info = await download_media(url, format_choice=format_choice, progress_cb=progress_hook)
+        await progress_hook.flush()
     except Exception as e:
         print(f"Download error: {e}")
         if getattr(msg, 'is_bubble', False) and 'video is not available' in str(e).lower():

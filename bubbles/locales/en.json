@@ -122,5 +122,6 @@
   "upload": "Sending…",
   "processing_title": "Processing",
   "waiting": "Please wait…",
-  "search_failed": "Search failed. Please try again."
+  "search_failed": "Search failed. Please try again.",
+  "waiting_source": "Waiting for source…"
 }
