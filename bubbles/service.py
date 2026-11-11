@@ -8,6 +8,7 @@ from .thumbnails import thumbnail, search_thumbnails
 from .delivery import AmbiguousDelivery
 import json
 import html
+import hashlib
 import logging
 import math
 import os
@@ -60,10 +61,20 @@ def load_design(language):
     for key, filename in [('STYLES', 'styles.css'), ('FORMAT', 'format.html'),
                           ('SEARCH', 'search.html'), ('PROGRESS', 'progress.html'),
                           ('ERROR', 'error.html'), ('SCRIPT', 'widget.js')]:
-        source = source.replace(f'__{key}__', (folder / filename).read_text())
+        fragment = (folder / filename).read_text()
+        if key == 'SCRIPT':
+            try:
+                build = json.loads((folder / 'widget.build.json').read_text())
+                compact = (folder / 'widget.min.js').read_bytes()
+                if (build['source_sha256'] == hashlib.sha256((folder / filename).read_bytes()).hexdigest()
+                        and build['output_sha256'] == hashlib.sha256(compact).hexdigest()):
+                    fragment = compact.decode()
+            except (OSError, ValueError, KeyError):
+                pass
+        source = source.replace(f'__{key}__', fragment)
     keys = set(re.findall(r'\bI\.([a-z_]+)', source) + re.findall(r'data-i18n="([a-z_]+)"', source))
     translations = {k: v for k, v in strings(language).items() if k in keys}
-    source = source.replace('__I18N__', json.dumps(translations, ensure_ascii=False,
+    source = source.replace('__I18N__', json.dumps(translations, ensure_ascii=True,
                                                   separators=(',', ':')).replace('<', '\\u003c'))
     source = source.replace('lang="ru"', f'lang="{locale(language)}"')
     raw = source.encode()
@@ -137,6 +148,7 @@ def item(url, info=None, audio=True, video=True):
     if not cover and re.fullmatch(r'[A-Za-z0-9_-]{11}', str(info.get('id') or '')) and 'youtube.com/' in url:
         cover = f"https://i.ytimg.com/vi/{info['id']}/default.jpg"
     return dict(url=url, thumbnail=cover, title=shorten(info.get('title'), 160),
+                full_title=shorten(info.get('title'), 800),
                 artist=shorten(info.get('uploader') or info.get('artist'), 80),
                 duration=duration(info.get('duration')), audio=audio, video=video)
 
@@ -538,6 +550,14 @@ class BubbleService:
         if owner in self.busy_users:
             await answer(words['busy']); return
         parts = data.split('|')
+        if (len(parts) == 2 and parts[0] == 'title' and parts[1].isascii() and parts[1].isdigit()
+                and entry.state.get('view') == 'search' and not entry.state.get('error')):
+            index = int(parts[1])
+            if index < len(entry.items):
+                await answer('title|' + (entry.items[index].get('full_title') or entry.items[index]['title']))
+            else:
+                await answer(words['unavailable'])
+            return
         if data == 'resend':
             if entry.state.get('error') not in ('send', 'uncertain') or not entry.filename or time.monotonic() >= entry.file_deadline or not Path(entry.filename).is_file():
                 entry.forget_file(remove=True)
