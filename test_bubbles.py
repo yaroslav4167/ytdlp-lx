@@ -56,7 +56,7 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(len(source.encode()),32768)
             self.assertLessEqual(len(zlib.compress(source.encode(),9)),4096)
             self.assertNotIn('__I18N__',source)
-            self.assertIn(strings(code)['download_audio'],source)
+            self.assertIn(json.dumps(strings(code)['download_audio'], ensure_ascii=True)[1:-1],source)
 
     async def test_progress_keeps_latest_sample_and_stops_after_sending(self):
         entry = await self.card()
@@ -205,6 +205,20 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry.state['error'],'too_large')
         self.assertIn('50',entry.state['problem'][3])
         self.send.assert_not_awaited()
+
+    async def test_selected_title_returns_full_text_without_starting_download(self):
+        title='A long recording title — '*15
+        self.items[0]=item('https://example.com/long',{'title':title})
+        entry=await self.card('search')
+        self.assertNotEqual(entry.state['rows'][0][1],title)
+        answer=await self.dispatch('title|0')
+        answer.assert_awaited_once_with('title|'+title)
+        self.download.assert_not_awaited()
+        self.assertFalse(entry.busy)
+        rejected=await self.dispatch('title|99')
+        rejected.assert_awaited_once_with(entry.words['unavailable'])
+        other=await self.dispatch('title|0',owner=999)
+        self.assertNotEqual(other.await_args.args[0],'title|'+title)
 
     def sequential_widget_ids(self):
         counter=0

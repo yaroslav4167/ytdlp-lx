@@ -21,6 +21,7 @@ Copy the design directory and set `BUBBLES_DESIGN=other-name` to select another 
 Before deploying:
 
 ```sh
+python -m bubbles.build  # Node/npm on the development machine only
 python -m bubbles.check
 TELEGRAM_BOT_TOKEN=123456:offline-test python -m unittest -v test_bubbles test_yandex_music
 ```
@@ -70,3 +71,9 @@ A single widget is sent before search or URL inspection, with all view templates
 Search uses flat result metadata immediately. It does not fully extract all eight videos before showing the list. Source format validation happens only after download selection. Ordinary search keyboards also avoid per-result requests. A direct link reuses one probe for playlist detection, media types and card metadata.
 
 Covers are fetched and pushed in a background application task after the results card is sent. Completion cannot overwrite a newer loading/error state or resurrect a deleted card. Search has a 25-second deadline and an explicit problem state, so an upstream failure does not leave an endless spinner.
+
+## Long recording titles
+
+Only the selected row scrolls, and only when its title overflows. Motion pauses at both ends and respects reduced-motion preferences. Tapping a row fetches its full title (up to 800 UTF-8 bytes) from the existing server registry; the compact eight-row payload stays within 1024 bytes. Download taps wait for any pending title request so widget requests never overlap. Titles are inserted as text, never HTML.
+
+After editing `widget.js`, run `python -m bubbles.build` (Node/npm required locally). It uses Terser 5.51.2 to produce `widget.min.js` and `widget.build.json`; deploy those with the source. Inline HTML handler names are preserved. The server needs no Node for this build: it uses the compact file only when both source and output hashes match, otherwise it reads the source and applies the same size checks. HTML/CSS/localization edits do not require rebuilding JavaScript.
