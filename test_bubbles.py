@@ -221,6 +221,41 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.download.assert_not_awaited()
         self.assertEqual(len([c for c in self.bot.do_api_request.await_args_list if c.kwargs['endpoint']=='sendWidget']),1)
 
+    def test_high_quality_cover_is_square_and_not_upscaled_at_32px(self):
+        import base64,io
+        from PIL import Image
+        from bubbles.thumbnails import encode_image
+        source=Image.new('RGB',(160,90))
+        source.putdata([((x*17+y*5)%256,(x*3+y*19)%256,(x*11+y*7)%256) for y in range(90) for x in range(160)])
+        output=io.BytesIO();source.save(output,format='PNG')
+        cover=encode_image(output.getvalue(),hero=True)
+        self.assertIsNotNone(cover)
+        raw=base64.b64decode(cover.split(',')[1])
+        with Image.open(io.BytesIO(raw)) as image:
+            self.assertEqual(image.width,image.height)
+            self.assertGreaterEqual(image.width,32)
+        self.assertLessEqual(len(raw),738)
+        self.assertLessEqual(len(state_json({'7':cover}).encode()),1024)
+
+    async def test_progressive_artwork_uses_same_message_and_stops_on_download(self):
+        entry=await self.card('search')
+        entry.artwork_ready.set()
+        entry.covers={0:'data:image/webp;base64,one',1:'data:image/webp;base64,two'}
+        self.bot.do_api_request.reset_mock()
+        with patch('bubbles.service.asyncio.sleep',AsyncMock()):
+            await entry.replay_covers()
+        calls=self.bot.do_api_request.await_args_list
+        self.assertEqual(len(calls),2)
+        for index,call in enumerate(calls):
+            self.assertEqual(call.kwargs['endpoint'],'editMessageWidgetData')
+            self.assertEqual(call.kwargs['api_kwargs']['message_id'],entry.message_id)
+            self.assertEqual(json.loads(call.kwargs['api_kwargs']['public_data']),{str(index):entry.covers[index]})
+        await entry.begin(0,'mp3')
+        self.bot.do_api_request.reset_mock()
+        with patch('bubbles.service.asyncio.sleep',AsyncMock()):
+            await entry.replay_covers()
+        self.bot.do_api_request.assert_not_awaited()
+
     def sequential_widget_ids(self):
         counter=0
         def response(endpoint,api_kwargs,**kwargs):

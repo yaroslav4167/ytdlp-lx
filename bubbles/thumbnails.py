@@ -61,19 +61,21 @@ async def fetch_image(url):
 
 def encode_image(data, hero=False):
     """A dedicated 1024-byte public_data budget leaves HTML and chat_data free."""
-    budget = 650 if hero else 210
-    sizes = [(128,72),(96,54),(64,36),(48,27),(32,18)] if hero else [(40,40),(32,32),(24,24),(16,16)]
+    budget = 738 if hero else 210
+    sizes = [(64,64),(56,56),(48,48),(40,40),(32,32)] if hero else [(40,40),(32,32),(24,24),(16,16)]
     with Image.open(io.BytesIO(data)) as source:
         if source.width * source.height > 16_000_000:
             return None
         source = source.convert('RGB')
-        for size in sizes:
-            thumb = ImageOps.fit(source, size, method=Image.Resampling.LANCZOS)
-            for quality in (25, 12, 5):
+        thumbs={size:ImageOps.fit(source,size,method=Image.Resampling.LANCZOS) for size in sizes}
+        for quality in ((80,65,50,35,25) if hero else (40,25,12)):
+            for size in sizes:
+                thumb = thumbs[size]
                 output = io.BytesIO()
                 thumb.save(output, format='WEBP', quality=quality, method=6)
                 if output.tell() <= budget:
                     return 'data:image/webp;base64,' + base64.b64encode(output.getvalue()).decode('ascii')
+
     return None
 
 
@@ -113,7 +115,7 @@ def search_artwork(images):
         for quality in (25, 12, 5):
             output = io.BytesIO()
             atlas.save(output, format='WEBP', quality=quality, method=6)
-            if output.tell() <= 650:
+            if output.tell() <= 738:
                 return 'data:image/webp;base64,' + base64.b64encode(output.getvalue()).decode('ascii'), heroes
     return None, heroes
 

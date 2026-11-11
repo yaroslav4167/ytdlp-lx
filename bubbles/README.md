@@ -79,3 +79,7 @@ Search always keeps all eight results in one widget. Titles wrap across lines; s
 The initial state stays within 1024 bytes. If full names cannot fit, the private-chat widget fetches the remaining names in bounded background replies (at least 5.2 seconds apart) and changes title text in place. Download taps wait for a pending background reply. A small font adjustment keeps long lists within the widget height where practical. The authoritative full titles remain in the owned server registry.
 
 After editing `widget.js`, run `python -m bubbles.build` (Node/npm required locally). It uses Terser 5.51.2 to produce `widget.min.js` and `widget.build.json`; deploy those with the source. Inline HTML handler names are preserved. The server needs no npm runtime: it uses the compact file only when source and output hashes match. HTML/CSS/localization edits do not require rebuilding JavaScript.
+
+## Cover quality
+
+The initial eight-cover atlas is a fast preview. A private-chat background lookup starts a bounded replay of separately encoded square covers (32–64 px), at most one image update every 1.1 seconds, within the same widget. Each update stays below the 1024-byte public-data cap. The client merges cover fragments and retains unchanged image nodes; identical chat state does not rebuild the list. Replays stop on download, errors, deletion or eviction. A recreated widget can request the cached images again. Selected/download covers use the same square encoder, with a 738-byte image budget and higher WebP quality.
