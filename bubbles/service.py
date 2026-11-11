@@ -165,6 +165,7 @@ class Bubble:
         self.busy = False
         self.last_progress = 0
         self.progress_task = None
+        self.progress_events_lock = asyncio.Lock()
         self.lock = asyncio.Lock()
         self.published = None
         self.covers = {}
@@ -242,11 +243,16 @@ class Bubble:
         media = self.items[index]
         self.state = {'view': 'progress', 'title': media['title'] or self.words['recording'],
                       'artist': media['artist'], 'duration': media['duration'],
-                      'format': fmt, 'stage': 'downloading', 'percent': None, 'cover_index':index}
+                      'format': fmt, 'stage': 'downloading', 'stage_title': self.words['waiting_source'],
+                      'percent': None, 'cover_index':index}
         self.last_progress = 0
         await self.publish()
 
     async def update_progress(self, data):
+        async with self.progress_events_lock:
+            await self.apply_progress(data)
+
+    async def apply_progress(self, data):
         if self.state.get('error') or self.state.get('stage') in ('sending', 'done'):
             return
         stage = data.get('status')
@@ -254,10 +260,16 @@ class Bubble:
             await self.error('source')
             return
         if stage == 'converting':
+            if self.state.get('stage') == 'downloading':
+                # Flush the real final byte count before replacing a short download
+                # with conversion. Slow Telegram edits must not erase this phase.
+                await self.publish()
+            self.state.pop('stage_title', None)
             percent = data.get('percent')
             self.state.update(stage='converting', percent=round(percent, 1) if percent is not None else None,
                               eta='', speed='', size='', part='')
         elif stage in ('downloading', 'finished'):
+            self.state.pop('stage_title', None)
             # Estimates change between HLS fragments and can report 100% too early.
             total = data.get('total_bytes') or 0
             downloaded = data.get('downloaded_bytes') or 0
@@ -298,6 +310,7 @@ class Bubble:
             await self.error('source')
         elif 'Sending file' in text or text == self.words['sending_plain']:
             self.state.pop('error', None)
+            self.state.pop('stage_title', None)
             self.state.update(stage='sending', percent=None, eta='', speed='', size='', part='')
             await self.publish()
         return self

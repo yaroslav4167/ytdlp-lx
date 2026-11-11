@@ -116,6 +116,40 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(events), 2)
         self.assertTrue(all(e['percent'] is None for e in events))
 
+    async def test_fast_download_is_published_before_conversion_with_slow_transport(self):
+        entry = await self.card()
+        await entry.begin(0, 'mp3')
+        self.assertEqual(entry.state['stage_title'], entry.words['waiting_source'])
+        sent = []
+        async def slow_request(endpoint, api_kwargs, **kwargs):
+            sent.append(json.loads(api_kwargs['chat_data']))
+            await asyncio.sleep(.05)
+            return True
+        self.bot.do_api_request.side_effect = slow_request
+        await entry.update_progress({'status':'downloading', 'downloaded_bytes':1, 'total_bytes':100})
+        await asyncio.sleep(.01)
+        await entry.update_progress({'status':'finished', 'downloaded_bytes':100, 'total_bytes':100})
+        await entry.update_progress({'status':'converting', 'percent':None})
+        await entry.update_progress({'status':'converting', 'percent':30})
+        await entry.progress_task
+        phases = [(s['stage'], s.get('percent')) for s in sent]
+        self.assertIn(('downloading',100), phases)
+        self.assertLess(phases.index(('downloading',100)), phases.index(('converting',30)))
+        self.assertNotIn('stage_title', entry.state)
+
+    async def test_progress_hook_flush_waits_for_queued_phase_transition(self):
+        entry = await self.card()
+        await entry.begin(0, 'mp3')
+        hook = main.make_progress_hook(entry, asyncio.get_running_loop())
+        def worker():
+            hook({'status':'finished', 'downloaded_bytes':100, 'total_bytes':100})
+            hook({'status':'converting', 'percent':25})
+        await asyncio.to_thread(worker)
+        await hook.flush()
+        self.assertEqual(entry.state['stage'], 'converting')
+        self.assertEqual(entry.state['percent'], 25)
+        await entry.progress_task
+
     def sequential_widget_ids(self):
         counter=0
         def response(endpoint,api_kwargs,**kwargs):
