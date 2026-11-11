@@ -8,6 +8,7 @@ Edit `designs/default/`:
 
 - `bubble.html` — the shared document shell and view containers;
 - `format.html`, `search.html`, `progress.html`, `error.html` — individual screens;
+- `loading.html` — the small standalone animated processing placeholder;
 - `styles.css` — typography, spacing, theme-aware colors;
 - `widget.js` — rendering state, track selection, and direct download actions.
 
@@ -61,3 +62,11 @@ https://core.telegram.org/bots/api#sendwidget
 `delivery.py` does not blindly retry media uploads after timeouts, connection-read errors, or bad-gateway responses: Telegram may already have delivered the file. Such outcomes show an unconfirmed-delivery screen and require an explicit manual retry. Only explicit flood-wait rejections and failures before connection establishment can retry automatically. A failure to remove a completed widget never restarts media delivery.
 
 The loading card uses the same small square artwork to the left of the recording title as the search list. During upload the center reads “Отправка” / “Sending”, instead of an arrow.
+
+## Response latency
+
+A small animated processing widget is sent before search or URL inspection. The final card replaces it; if an error requires the text fallback, the placeholder is replaced by one editable text message.
+
+Search uses flat result metadata immediately. It does not fully extract all eight videos before showing the list. Source format validation happens only after download selection. Ordinary search keyboards also avoid per-result requests. A direct link reuses one probe for playlist detection, media types and card metadata.
+
+Covers are fetched and pushed in a background application task after the results card is sent. Completion cannot overwrite a newer loading/error state or resurrect a deleted card. Search has a 25-second deadline and an explicit problem state, so an upstream failure does not leave an endless spinner.

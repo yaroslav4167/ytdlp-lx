@@ -7,6 +7,7 @@ from collections import OrderedDict
 from .thumbnails import thumbnail, search_thumbnails
 from .delivery import AmbiguousDelivery
 import json
+import html
 import logging
 import math
 import os
@@ -69,6 +70,56 @@ def load_design(language):
     if len(raw) > 32768 or len(zlib.compress(raw, 9)) > 4096:
         raise ValueError(f'Widget HTML exceeds Telegram size limits: {len(raw)} raw / {len(zlib.compress(raw, 9))} compressed')
     return source
+
+
+def load_loading_design(language):
+    name = os.environ.get('BUBBLES_DESIGN', 'default')
+    if not name.replace('-', '').replace('_', '').isalnum():
+        raise ValueError('Invalid BUBBLES_DESIGN')
+    source = (ROOT / 'designs' / name / 'loading.html').read_text()
+    words = strings(language)
+    for key, value in [('LANG',locale(language)), ('TITLE',words['processing_title']), ('WAITING',words['waiting'])]:
+        source = source.replace('__'+key+'__',html.escape(value))
+    raw = source.encode()
+    if len(raw)>32768 or len(zlib.compress(raw,9))>4096:
+        raise ValueError('Loading widget exceeds Telegram size limits')
+    return source
+
+
+class ProcessingMessage:
+    """Animated placeholder that can fall back to the existing text-message interface."""
+    def __init__(self, service, context, source, message_id):
+        self.service, self.context, self.source = service, context, source
+        self.chat_id, self.message_id = source.chat_id, message_id
+        self.loader_deleted = False
+        self.fallback = None
+
+    async def delete_loader(self):
+        if not self.loader_deleted:
+            try:
+                await self.context.bot.delete_message(chat_id=self.chat_id,message_id=self.message_id,
+                    connect_timeout=3,read_timeout=4,write_timeout=4,pool_timeout=1)
+                self.loader_deleted = True
+            except Exception as exception:
+                if 'message to delete not found' in str(exception).lower():
+                    self.loader_deleted = True
+                else:
+                    LOG.warning('Could not remove processing widget (%s)',type(exception).__name__)
+
+    async def edit_text(self, text, **kwargs):
+        if self.fallback is not None:
+            return await self.fallback.edit_text(text,**kwargs)
+        if getattr(self.source,'message_thread_id',None):
+            kwargs['message_thread_id'] = self.source.message_thread_id
+        self.fallback = await self.context.bot.send_message(chat_id=self.chat_id,text=text,**kwargs)
+        await self.delete_loader()
+        return self.fallback
+
+    async def delete(self):
+        await self.delete_loader()
+        if self.fallback is not None:
+            await self.fallback.delete()
+            self.fallback = None
 
 
 def duration(value):
@@ -324,6 +375,20 @@ class BubbleService:
                 entry.forget_file(remove=True)
                 del self.entries[key]
 
+    async def send_loading(self, context, source):
+        if not self.enabled(source,context):
+            return None
+        try:
+            language = user_language(source.from_user,context.user_data)
+            payload = {'chat_id':source.chat_id,'html':load_loading_design(language)}
+            if getattr(source,'message_thread_id',None):
+                payload['message_thread_id']=source.message_thread_id
+            result = await self.api(context.bot,'sendWidget',**payload)
+            return ProcessingMessage(self,context,source,result['message_id'])
+        except Exception as exception:
+            LOG.warning('Processing widget unavailable (%s)',type(exception).__name__)
+            return None
+
     async def send(self, context, source, items, title='', view='format', error=None):
         if not self.enabled(source, context):
             return None
@@ -338,7 +403,6 @@ class BubbleService:
         if error:
             entry.problem_state(error)
         try:
-            await entry.prepare_covers()
             payload = dict(chat_id=source.chat_id, html=load_design(language),
                            chat_data=state_json(entry.state),
                            allow_queries=True, public_data=entry.cover_data())
@@ -353,7 +417,20 @@ class BubbleService:
             LOG.warning('Widget unavailable; using plain UI (%s)', type(exception).__name__)
             return None
         self.entries[(entry.chat_id, entry.message_id)] = entry
+        if not error and any(v.get('thumbnail') for v in items):
+            context.application.create_task(self.refresh_covers(entry))
         return entry
+
+    async def refresh_covers(self, entry):
+        try:
+            await entry.prepare_covers()
+            if entry.deleted or entry.state.get('stage') == 'done':
+                entry.covers.clear();entry.cover_atlas = None
+                return
+            if self.entries.get((entry.chat_id, entry.message_id)) is entry:
+                await entry.publish()
+        except Exception as exception:
+            LOG.warning('Background artwork failed (%s)', type(exception).__name__)
 
     async def handle_widget(self, update, context):
         query = getattr(update, 'widget_query', None)

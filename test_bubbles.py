@@ -57,6 +57,85 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('__I18N__',source)
             self.assertIn(strings(code)['download_audio'],source)
 
+    def sequential_widget_ids(self):
+        counter=0
+        def response(endpoint,api_kwargs,**kwargs):
+            nonlocal counter
+            if endpoint=='sendWidget':
+                counter+=1
+                return {'message_id':counter}
+            return True
+        self.bot.do_api_request.side_effect=response
+
+    async def test_search_does_not_wait_for_per_result_probes(self):
+        self.sequential_widget_ids()
+        self.source.text='Artist track'
+        self.source.reply_text=AsyncMock()
+        update=SimpleNamespace(message=self.source,effective_user=self.source.from_user)
+        results=[{'id':f'v{i}','title':f'Track {i}'} for i in range(8)]
+        with patch.object(main,'search_youtube',AsyncMock(return_value=results)), \
+             patch.object(main,'probe_url',AsyncMock(side_effect=AssertionError('extra full probe'))), \
+             patch.object(main,'url_media_types',AsyncMock(side_effect=AssertionError('per-result probe'))):
+            await main.process_message(update,self.context)
+        self.source.reply_text.assert_not_awaited()
+        calls=[c for c in self.bot.do_api_request.await_args_list if c.kwargs['endpoint']=='sendWidget']
+        self.assertEqual(len(calls),2)
+        self.assertIn('spinner',calls[0].kwargs['api_kwargs']['html'])
+        self.assertEqual(len(json.loads(calls[1].kwargs['api_kwargs']['chat_data'])['rows']),8)
+        self.bot.delete_message.assert_awaited_once()
+
+    async def test_search_timeout_replaces_spinner_with_problem_card(self):
+        self.sequential_widget_ids()
+        self.source.text='Artist track';self.source.reply_text=AsyncMock()
+        update=SimpleNamespace(message=self.source,effective_user=self.source.from_user)
+        async def stalled(_):
+            await asyncio.Event().wait()
+        with patch.object(main,'search_youtube',side_effect=stalled), patch.object(main,'SEARCH_TIMEOUT',.01):
+            await main.process_message(update,self.context)
+        payload=self.bot.do_api_request.await_args.kwargs['api_kwargs']
+        self.assertEqual(json.loads(payload['chat_data'])['error'],'search')
+        self.bot.delete_message.assert_awaited_once()
+
+    async def test_direct_link_reuses_single_probe(self):
+        self.sequential_widget_ids()
+        self.source.text='https://www.youtube.com/watch?v=example'
+        self.source.reply_text=AsyncMock()
+        update=SimpleNamespace(message=self.source,effective_user=self.source.from_user)
+        probe=AsyncMock(return_value={'title':'Video','formats':[{'acodec':'aac','vcodec':'h264','ext':'mp4'}]})
+        with patch.object(main,'probe_url',probe):
+            await main.process_message(update,self.context)
+        self.assertEqual(probe.await_count,1)
+        self.source.reply_text.assert_not_awaited()
+
+    async def test_artwork_does_not_block_card_or_revert_loading(self):
+        gate=asyncio.Event()
+        self.items[0]['thumbnail']='https://example.com/cover.jpg'
+        async def fetch(*args,**kwargs):
+            await gate.wait()
+            return 'data:image/webp;base64,example'
+        with patch('bubbles.service.thumbnail',side_effect=fetch):
+            try:
+                entry=await asyncio.wait_for(self.card(),timeout=.2)
+                self.assertEqual(entry.covers,{})
+                await entry.begin(0,'mp3')
+            finally:
+                gate.set()
+            await asyncio.gather(*self.tasks)
+        self.assertEqual(entry.state['view'],'progress')
+        self.assertEqual(json.loads(entry.cover_data()),{'0':'data:image/webp;base64,example'})
+
+    async def test_processing_widget_falls_back_to_one_editable_text_message(self):
+        loader=await self.service.send_loading(self.context,self.source)
+        fallback=SimpleNamespace(edit_text=AsyncMock(),delete=AsyncMock())
+        self.bot.send_message.return_value=fallback
+        await loader.edit_text('First')
+        await loader.edit_text('Second')
+        await loader.delete()
+        self.bot.send_message.assert_awaited_once()
+        self.bot.delete_message.assert_awaited_once()
+        fallback.edit_text.assert_awaited_once_with('Second')
+        fallback.delete.assert_awaited_once()
+
     async def test_caption_and_native_keyboard_are_absent(self):
         entry = await self.card()
         payload = self.bot.do_api_request.await_args.kwargs['api_kwargs']

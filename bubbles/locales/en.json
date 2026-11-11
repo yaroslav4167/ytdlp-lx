@@ -93,6 +93,14 @@
       "YouTube reports that this recording is unavailable. Choose another result or send a different link.",
       "Try another search",
       "input"
+    ],
+    "search": [
+      "Search",
+      "!",
+      "Search could not finish",
+      "The service did not respond in time. Please send the query again.",
+      "Try again",
+      "input"
     ]
   },
   "processing": "⏳ Processing...",
@@ -111,5 +119,8 @@
   "speed_plain": "Speed",
   "remaining_plain": "Remaining",
   "download_error_plain": "❌ Download error.",
-  "upload": "Sending"
+  "upload": "Sending…",
+  "processing_title": "Processing",
+  "waiting": "Please wait…",
+  "search_failed": "Search failed. Please try again."
 }
