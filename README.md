@@ -106,3 +106,16 @@ TikTok may be skipped when the test server IP is blocked by TikTok. This is an u
 ## Security
 
 Never commit `.env`, bot tokens, Spotify secrets, browser cookies, downloaded media, or server backups. Rotate any credential that was previously stored in source code.
+
+## Interactive Telegram cards (HTMLBubbles)
+
+Private chats use interactive format, search and progress cards, with separate
+error screens and native file delivery. Use `/plain` for ordinary messages,
+`/bubbles` to enable cards, and `/language ru|en|auto` to choose the UI language.
+Telegram's user language is used automatically; missing/unsupported languages
+fall back to English. Commands/preferences apply until the next bot restart.
+
+Designs are editable in `bubbles/designs/default/`; translations are in
+`bubbles/locales/`. New cards read templates from disk without restarting.
+See [the editing and deployment guide](bubbles/README.md) for limits, fallback
+behavior, and the 10-minute retry window for files whose delivery failed.
