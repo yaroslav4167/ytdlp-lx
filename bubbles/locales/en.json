@@ -123,5 +123,17 @@
   "processing_title": "Processing",
   "waiting": "Please wait…",
   "search_failed": "Search failed. Please try again.",
-  "waiting_source": "Waiting for source…"
+  "waiting_source": "Waiting for source…",
+  "progress_details": {
+    "metadata": "Fetching recording details…",
+    "formats": "Selecting a suitable format…",
+    "artwork": "Fetching artwork…",
+    "transfer": "Fetching the stream URL…",
+    "audio": "Downloading the audio track…",
+    "video": "Downloading the video track…",
+    "download": "Downloading the file…",
+    "finished": "Download complete",
+    "convert": "Preparing the file for Telegram…",
+    "sending": "Uploading the file to Telegram…"
+  }
 }

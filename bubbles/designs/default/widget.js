@@ -60,7 +60,7 @@ function render(){
     el('fill').style.width=percent+'%';el('fill').className=S.percent==null?'waiting':'';text('eta',S.eta);text('size',S.size);text('speed',S.speed);
     var active={downloading:0,converting:1,sending:2}[stage];
     for(var i=0;i<3;i++)el('step'+i).className=i<=active?'active-step':'';
-    text('progress-hint',I.working);el('loading-cover').setAttribute('data-cover',String(S.cover_index||0));images();
+    text('progress-hint',S.detail||I.working);el('loading-cover').setAttribute('data-cover',String(S.cover_index||0));images();
   }
 }
 document.querySelectorAll('[data-i18n]').forEach(function(e){e.textContent=I[e.getAttribute('data-i18n')]||'';});
