@@ -1,4 +1,4 @@
-var I=__I18N__,W=window.TelegramWidget,S={},C={},selected=0,busy=false,phase='',names=0,loading=false,pending=Promise.resolve(),titles={},font=13,rendered=null;
+var I=__I18N__,W=window.TelegramWidget,S={},C={},selected=0,busy=false,names=0,loading=false,pending=Promise.resolve(),titles={},font=13,rendered=null;
 function el(id){return document.getElementById(id);}
 function text(id,value){el(id).textContent=value||'';}
 function ask(data){
@@ -65,17 +65,6 @@ function hydrate(){
     data[1].forEach(function(r){if(art)C[r[0]]=r[1];else{titles[r[0]]=r[1];text('track'+r[0],r[1]);}});if(art)images();else fit();
   }).catch(function(){}).finally(function(){loading=false;if(names<S.total*2)setTimeout(hydrate,5200);});
 }
-function animate(value){
-  var e=el('percent');
-  if(e.dataset.value===value)return;e.dataset.value=value;
-  e.textContent=value;
-  if(value.endsWith('…')){
-    e.textContent=value.slice(0,-1);
-    for(var i=0;i<3;i++){var dot=document.createElement('span');dot.textContent='•';dot.style.animationDelay=i*.18+'s';e.appendChild(dot);}
-    return;
-  }
-  if(e.animate)e.animate([{opacity:.25},{}],220);
-}
 function render(){
   if(rendered===W.chatData)return;rendered=W.chatData;
   try{S=JSON.parse(W.chatData)||{};}catch(e){S={};}
@@ -95,10 +84,15 @@ function render(){
   }else if(view==='search'){search();}else{
     var stage=S.stage||'downloading',active={downloading:0,converting:1,sending:2}[stage];
     text('filetype',(S.format||'').toUpperCase());
-    var percent=Math.max(0,Math.min(100,Number(S.percent)||0));animate(stage==='sending'?I.step_send+'…':S.percent==null?'…':percent+'%');
-    var key=stage+'|'+(S.part||'');el('fill').style.transition=phase!==key||S.percent==null?'none':'';phase=key;el('fill').style.width=percent+'%';
-    el('fill').className=S.percent==null?'waiting':'';text('eta',S.eta);text('size',S.size);text('speed',S.speed);
-    for(var i=0;i<3;i++)el('step'+i).className='pill '+(i<active?'done-step':i===active?'active-step':'');
+    var percent=Math.max(0,Math.min(100,Number(S.percent)||0)),unknown=S.percent==null||stage==='sending';
+    el('fill').style.width=(active*100+(unknown?0:percent))/3+'%';
+    text('eta',S.eta);text('size',S.size);text('speed',S.speed);
+    for(var i=0;i<3;i++){
+      var cls=i<active?'done':i===active?'current':'';
+      el('step'+i).className=cls;el('point'+i).className='point '+cls+(i===active&&unknown?' waiting':'');
+      text('num'+i,i<active?'✓':i===active?(unknown?'':String(percent)):String(i+1));
+    }
+    el('point'+active).style.setProperty('--p',percent);
     text('progress-hint',S.detail);el('loading-cover').setAttribute('data-cover',String(S.cover_index||0));images();
   }
 }
