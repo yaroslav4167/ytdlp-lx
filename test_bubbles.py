@@ -81,9 +81,40 @@ class BubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(entry.state['percent'])
         self.assertTrue(entry.state['size'])
         await entry.update_progress({'status':'downloading', 'downloaded_bytes':100, 'total_bytes_estimate':300})
-        self.assertEqual(entry.state['percent'], 33.3)
-        self.assertTrue(entry.state['approximate'])
+        self.assertIsNone(entry.state['percent'])
+        self.assertEqual(entry.state['stage'], 'downloading')
         await entry.progress_task
+
+    async def test_stream_completion_does_not_start_preparation(self):
+        entry = await self.card()
+        await entry.begin(0, 'mp4')
+        await entry.update_progress({'status':'finished', 'downloaded_bytes':100, 'total_bytes':100, 'part':'video'})
+        self.assertEqual(entry.state['stage'], 'downloading')
+        self.assertEqual(entry.state['part'], entry.words['video'])
+        await entry.update_progress({'status':'downloading', 'downloaded_bytes':20, 'total_bytes':100, 'part':'audio'})
+        self.assertEqual(entry.state['stage'], 'downloading')
+        self.assertEqual(entry.state['part'], entry.words['audio'])
+        await entry.update_progress({'status':'converting', 'percent':None})
+        self.assertEqual(entry.state['stage'], 'converting')
+        self.assertIsNone(entry.state['percent'])
+        self.assertFalse(entry.state['part'])
+        await entry.progress_task
+
+    async def test_failed_progress_edit_retries_latest_state(self):
+        entry = await self.card()
+        await entry.begin(0, 'mp3')
+        self.bot.do_api_request.side_effect = [TimeoutError(), {'ok':True}]
+        await entry.update_progress({'status':'downloading', 'downloaded_bytes':30, 'total_bytes':100})
+        await entry.progress_task
+        self.assertEqual(json.loads(entry.published)['percent'], 30)
+
+    def test_ffmpeg_without_duration_never_invents_percent(self):
+        process = SimpleNamespace(stdout=['out_time_us=1000000\n'], wait=lambda:0)
+        events = []
+        with patch.object(main.subprocess, 'Popen', return_value=process):
+            self.assertEqual(main.run_ffmpeg('ffmpeg -i input output', None, events.append), 0)
+        self.assertEqual(len(events), 2)
+        self.assertTrue(all(e['percent'] is None for e in events))
 
     def sequential_widget_ids(self):
         counter=0

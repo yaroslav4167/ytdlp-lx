@@ -351,7 +351,7 @@ def make_progress_hook(msg, loop, words=None):
                 last_update['time'] = now
                 percent = d.get('percent', 0)
                 await edit_progress(
-                    f"{words['convert_plain']}\n{progress_bar(percent)}"
+                    f"{words['convert_plain']}" + (f"\n{progress_bar(percent)}" if percent is not None else "")
                 )
             elif status == 'error':
                 await edit_progress(words["download_error_plain"])
@@ -373,14 +373,16 @@ def run_ffmpeg(command, duration, progress_hook=None):
         stderr=subprocess.DEVNULL,
         text=True,
     )
-    duration_us = max((duration or 0) * 1_000_000, 1)
+    duration_us = duration * 1_000_000 if duration and duration > 0 else None
+    if progress_hook:
+        progress_hook({'status': 'converting', 'percent': None})
     for line in process.stdout:
         if line.startswith('out_time_us=') and progress_hook:
             try:
                 current_us = int(line.split('=', 1)[1])
                 progress_hook({
                     'status': 'converting',
-                    'percent': min(current_us / duration_us * 100, 100),
+                    'percent': min(max(0, current_us / duration_us * 100), 100) if duration_us else None,
                 })
             except ValueError:
                 pass
@@ -537,11 +539,14 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
     yt_dlp = get_yt_dlp()
     loop = asyncio.get_running_loop()
 
+    download_part = None
+
     def _hook(d):
         if progress_cb is not None:
-            progress_cb(d)
+            progress_cb(dict(d, part=download_part if d.get('status') in ('downloading', 'finished') else None))
 
     def _download():
+        nonlocal download_part
         # Базовые настройки
         ydl_opts = {
             'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
@@ -599,7 +604,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             if thumb_url:
                 try:
                     import requests
-                    r = requests.get(thumb_url)
+                    r = requests.get(thumb_url, timeout=(3, 5))
                     if r.status_code == 200:
                         with open(thumb_path, "wb") as f:
                             f.write(r.content)
@@ -639,15 +644,14 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
 
                 final_m4a = os.path.join(DOWNLOAD_DIR, f"final_{uid}.m4a")
 
-                subprocess.run(
-                    [
+                command = [
                         'ffmpeg', '-y', '-i', m4a_path,
                         '-metadata', f'title={title}',
                         '-metadata', f'artist={artist}',
                         '-c:a', 'copy', final_m4a,
-                    ],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
+                    ]
+                if run_ffmpeg(shlex.join(command), info.get('duration'), _hook):
+                    raise RuntimeError('Could not prepare audio')
 
                 try: os.remove(m4a_path)
                 except: pass
@@ -665,6 +669,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
 
             best_audio = best["format_id"]
 
+            download_part = 'audio'
             # скачиваем аудио
             with ProxyRetryYoutubeDL(ydl_options({
                 'outtmpl': audio_path,
@@ -688,7 +693,8 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             else:
                 cmd = f'ffmpeg -y -i "{audio_path}" -c:a libmp3lame -b:a 192k "{output_path}"'
 
-            run_ffmpeg(cmd, info.get('duration'), _hook)
+            if run_ffmpeg(cmd, info.get('duration'), _hook):
+                raise RuntimeError('Could not prepare media')
 
             if downloaded_size(output_path) > max_size:
                 os.remove(output_path)
@@ -757,18 +763,14 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                     ydl_direct.download([url])
 
                 if direct_ext == 'mp4':
-                    subprocess.run(
-                        ['ffmpeg', '-y', '-i', direct_path, '-c', 'copy',
-                         '-movflags', '+faststart', output_path],
-                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
+                    command = ['ffmpeg', '-y', '-i', direct_path, '-c', 'copy',
+                               '-movflags', '+faststart', output_path]
                 else:
-                    subprocess.run(
-                        ['ffmpeg', '-y', '-i', direct_path, '-c:v', 'libx264',
-                         '-vf', 'scale=-2:480', '-preset', 'ultrafast', '-crf', '32',
-                         '-c:a', 'aac', '-movflags', '+faststart', output_path],
-                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
+                    command = ['ffmpeg', '-y', '-i', direct_path, '-c:v', 'libx264',
+                               '-vf', 'scale=-2:480', '-preset', 'ultrafast', '-crf', '32',
+                               '-c:a', 'aac', '-movflags', '+faststart', output_path]
+                if run_ffmpeg(shlex.join(command), info.get('duration'), _hook):
+                    raise RuntimeError('Could not prepare video')
 
                 try: os.remove(direct_path)
                 except: pass
@@ -833,6 +835,8 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             audio_path = os.path.join(DOWNLOAD_DIR, f"audio_{uid}.{audio_ext or 'webm'}")
             output_path = os.path.join(DOWNLOAD_DIR, f"output_{uid}.mp4")
 
+            # Each stream has its own byte total; never present it as the whole job.
+            download_part = 'video'
             # скачиваем видео
             with ProxyRetryYoutubeDL(ydl_options({
                 'outtmpl': video_path,
@@ -842,6 +846,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             })) as ydl_v:
                 ydl_v.download([url])
 
+            download_part = 'audio'
             # скачиваем аудио
             with ProxyRetryYoutubeDL(ydl_options({
                 'outtmpl': audio_path,
@@ -875,7 +880,8 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                     f'ffmpeg -y {video_loop}-i "{video_path}" -i "{audio_path}" '
                     f'-c:v copy -c:a aac -shortest -movflags +faststart "{output_path}"'
                 )
-            run_ffmpeg(cmd, info.get('duration'), _hook)
+            if run_ffmpeg(cmd, info.get('duration'), _hook):
+                raise RuntimeError('Could not prepare media')
 
             if downloaded_size(output_path) > max_size:
                 os.remove(output_path)

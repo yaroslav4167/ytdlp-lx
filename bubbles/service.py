@@ -253,12 +253,13 @@ class Bubble:
         if stage == 'error':
             await self.error('source')
             return
-        if stage == 'finished':
-            self.state.update(stage='converting', percent=None, eta='', speed='', size='', approximate=False)
-        elif stage == 'converting':
-            self.state.update(stage='converting', percent=round(data.get('percent', 0), 1), eta='', speed='', approximate=False)
-        elif stage == 'downloading':
-            total = data.get('total_bytes') or data.get('total_bytes_estimate') or 0
+        if stage == 'converting':
+            percent = data.get('percent')
+            self.state.update(stage='converting', percent=round(percent, 1) if percent is not None else None,
+                              eta='', speed='', size='', part='')
+        elif stage in ('downloading', 'finished'):
+            # Estimates change between HLS fragments and can report 100% too early.
+            total = data.get('total_bytes') or 0
             downloaded = data.get('downloaded_bytes') or 0
             percent = min(100, max(0, downloaded/total*100)) if total else 0
             if not math.isfinite(percent):
@@ -266,7 +267,7 @@ class Bubble:
             speed = data.get('speed') or 0
             eta = data.get('eta')
             self.state.update(stage='downloading', percent=round(percent, 1) if total else None,
-                approximate=not bool(data.get('total_bytes')) and bool(total),
+                part=self.words.get(data.get('part'), '') if data.get('part') else '',
                 size=f'{downloaded/1048576:.1f} / {total/1048576:.1f} MiB' if total else f'{downloaded/1048576:.1f} MiB',
                 speed=f'{speed/1048576:.1f} MiB/s' if speed else '',
                 eta=self.words['eta'].format(seconds=max(0, int(eta))) if eta else '')
@@ -276,6 +277,7 @@ class Bubble:
             self.progress_task = asyncio.create_task(self.publish_progress())
 
     async def publish_progress(self):
+        started = time.monotonic()
         while not self.deleted and not self.state.get('error') and self.state.get('stage') not in ('sending', 'done'):
             await asyncio.sleep(max(0, .5 - (time.monotonic() - self.last_progress)))
             if self.deleted or self.state.get('error') or self.state.get('stage') in ('sending', 'done'):
@@ -284,7 +286,11 @@ class Bubble:
             self.last_progress = time.monotonic()
             await self.publish()
             await asyncio.sleep(.5)
-            if state_json(self.state) == before:
+            if state_json(self.state) == before and self.published == before:
+                return
+            # Retry failed idempotent state edits, always using the newest state.
+            # Stop after a bounded window if Telegram remains unavailable.
+            if time.monotonic() - started > 20:
                 return
 
     async def edit_text(self, text, **kwargs):
@@ -292,7 +298,7 @@ class Bubble:
             await self.error('source')
         elif 'Sending file' in text or text == self.words['sending_plain']:
             self.state.pop('error', None)
-            self.state.update(stage='sending', percent=100, eta='', speed='')
+            self.state.update(stage='sending', percent=None, eta='', speed='', size='', part='')
             await self.publish()
         return self
 

@@ -52,14 +52,13 @@ function render(){
   }else if(view==='format'){
     el('formats').style.display='flex';
     text('format-label',I.ready);
-    document.querySelectorAll('.cover').forEach(function(e){e.setAttribute('data-cover',String(S.cover_index||0));});
     el('mp3').style.display=S.audio===false?'none':'block';el('mp4').style.display=S.video===false?'none':'block';
     images();
   }else if(view==='search'){search();}else{
     var stage=S.stage||'downloading',names={downloading:I.download,converting:I.convert,sending:I.send,done:I.done};
-    text('stage',names[stage]);text('filetype',(S.format||'').toUpperCase());
-    var percent=Math.max(0,Math.min(100,Number(S.percent)||0));text('percent',stage==='done'?'✓':stage==='sending'?I.upload:S.percent==null?'…':(S.approximate?'≈':'')+percent+'%');
-    el('fill').style.width=percent+'%';text('eta',S.eta);text('size',S.size);text('speed',S.speed);
+    text('stage',names[stage]+(S.part?' · '+S.part:''));text('filetype',(S.format||'').toUpperCase());
+    var percent=Math.max(0,Math.min(100,Number(S.percent)||0));text('percent',stage==='done'?'✓':stage==='sending'?I.upload:S.percent==null?'…':percent+'%');
+    el('fill').style.width=percent+'%';el('fill').className=S.percent==null?'waiting':'';text('eta',S.eta);text('size',S.size);text('speed',S.speed);
     var active={downloading:0,converting:1,sending:2,done:3}[stage];
     for(var i=0;i<3;i++)el('step'+i).className=i<=active?'active-step':'';
     text('progress-hint',I.working);el('loading-cover').setAttribute('data-cover',String(S.cover_index||0));images();
