@@ -148,3 +148,5 @@ YouTube downloads require `yt-dlp[default]` (including EJS) and Deno >=2.3 or No
 Search results are shown before optional thumbnail downloads, without fully inspecting every result. An animated processing bubble replaces the initial plain-text wait message. Upload status reads “Отправка…” / “Sending…”.
 
 The bot registers `/start`, `/bubbles`, `/plain` and `/language` in Telegram’s command menu on startup, with Russian and English descriptions and an English fallback. A menu registration failure is logged without preventing polling.
+
+`/language` opens a language picker with Russian, English and automatic buttons. Typed `/language ru`, `/language en` and `/language auto` remain supported. In shared chats, only the user who opened a picker can use its buttons.
