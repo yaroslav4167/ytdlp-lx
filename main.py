@@ -1331,18 +1331,62 @@ async def bubble_mode(update, context):
     await update.message.reply_text(ui_words(update, context)['widget_on' if enabled else 'widget_off'])
 
 
-async def language_command(update, context):
+def language_keyboard(owner, words):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('Русский', callback_data=f'lang|{owner}|ru'),
+         InlineKeyboardButton('English', callback_data=f'lang|{owner}|en')],
+        [InlineKeyboardButton(words['language_auto'], callback_data=f'lang|{owner}|auto')],
+    ])
+
+
+def apply_language(context, choice):
     from bubbles.service import locale
-    choice = context.args[0].lower() if context.args else ''
     if choice == 'auto':
         context.user_data.pop('language', None)
     elif choice and locale(choice) == choice:
         context.user_data['language'] = choice
     else:
-        await update.message.reply_text(ui_words(update, context)['language_help'])
+        return False
+    return True
+
+
+def language_confirmation(update, context):
+    words = ui_words(update, context)
+    key = 'language_set' if context.user_data.get('language') else 'language_set_auto'
+    return words[key].format(language=user_language(update.effective_user, context.user_data))
+
+
+async def language_command(update, context):
+    choice = context.args[0].lower() if context.args else ''
+    if not apply_language(context, choice):
+        words = ui_words(update, context)
+        await update.message.reply_text(words['language_help'],
+            reply_markup=language_keyboard(update.effective_user.id, words))
         return
-    await update.message.reply_text(ui_words(update, context)['language_set'].format(
-        language=user_language(update.effective_user, context.user_data)))
+    await update.message.reply_text(language_confirmation(update, context))
+
+
+async def language_callback(update, context):
+    query = update.callback_query
+    data = (query.data or '').split('|')
+    words = ui_words(update, context)
+    if (len(data) != 3 or data[1] != str(update.effective_user.id)
+            or data[2] not in ('ru', 'en', 'auto')):
+        await query.answer(words['unavailable'])
+        return
+    apply_language(context, data[2])
+    words = ui_words(update, context)
+    try:
+        await query.answer(connect_timeout=3, read_timeout=3, write_timeout=3, pool_timeout=1)
+    except Exception as error:
+        LOG.warning('Language selection acknowledgement failed (%s)', type(error).__name__)
+    try:
+        await query.edit_message_text(language_confirmation(update, context),
+            reply_markup=language_keyboard(update.effective_user.id, words))
+    except Exception as error:
+        if 'message is not modified' not in str(error).lower():
+            raise
 
 
 async def try_bubble(context, source, progress_message, items, title='', view='format', error=None):
@@ -1578,6 +1622,7 @@ def build_app():
     app.add_handler(CommandHandler("bubbles", bubble_mode))
     app.add_handler(CommandHandler("plain", bubble_mode))
     app.add_handler(CommandHandler("language", language_command))
+    app.add_handler(CallbackQueryHandler(language_callback, pattern=r'^lang\|'))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
     return app

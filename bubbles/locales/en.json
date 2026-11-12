@@ -41,7 +41,7 @@
   "widget_on": "Interactive cards enabled.",
   "widget_off": "Plain messages and buttons enabled.",
   "language_set": "Language: {language}",
-  "language_help": "Choose a language: /language ru, /language en or /language auto.",
+  "language_help": "Choose a language:",
   "start": "Send a link or a track/video name.\nChoose audio or video after searching.\n/bubbles — interactive cards\n/plain — plain messages\n/language — select language",
   "unknown": "Unknown artist",
   "range": "{start}–{end} of {total}",
@@ -150,6 +150,8 @@
     "start": "How to use the bot",
     "bubbles": "Enable interactive cards",
     "plain": "Use plain messages and buttons",
-    "language": "Choose a language: ru, en or auto"
-  }
+    "language": "Choose a language"
+  },
+  "language_auto": "Automatic",
+  "language_set_auto": "Language: automatic ({language})"
 }
