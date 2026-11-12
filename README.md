@@ -146,3 +146,5 @@ Search cards show all eight recordings as a flat list without pagination. The se
 YouTube downloads require `yt-dlp[default]` (including EJS) and Deno >=2.3 or Node >=22. Deno is detected at `.tools/deno`, on PATH, or through `YTDLP_DENO`. Use the application virtual environment so these dependencies do not change other bots.
 
 Search results are shown before optional thumbnail downloads, without fully inspecting every result. An animated processing bubble replaces the initial plain-text wait message. Upload status reads “Отправка…” / “Sending…”.
+
+The bot registers `/start`, `/bubbles`, `/plain` and `/language` in Telegram’s command menu on startup, with Russian and English descriptions and an English fallback. A menu registration failure is logged without preventing polling.

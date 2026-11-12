@@ -145,5 +145,11 @@
     "sending": "Uploading the file to Telegram…"
   },
   "too_large_plain": "The file exceeds Telegram’s 50 MB limit. Choose a shorter recording.",
-  "queue": "In queue · #{position}"
+  "queue": "In queue · #{position}",
+  "commands": {
+    "start": "How to use the bot",
+    "bubbles": "Enable interactive cards",
+    "plain": "Use plain messages and buttons",
+    "language": "Choose a language: ru, en or auto"
+  }
 }

@@ -1518,6 +1518,22 @@ async def handle_error(update, context):
         LOG.error('Unhandled Telegram handler error', exc_info=(type(error), error, error.__traceback__))
 
 
+async def register_commands(application):
+    """Command handlers do not populate Telegram's slash-command menu."""
+    from telegram import BotCommand, BotCommandScopeDefault
+    for language in ('', 'en', 'ru'):
+        commands = [BotCommand(command, description)
+                    for command, description in bubble_strings(language)['commands'].items()]
+        try:
+            await telegram_retry(lambda: application.bot.set_my_commands(
+                commands, scope=BotCommandScopeDefault(), language_code=language,
+                connect_timeout=5, read_timeout=5, write_timeout=5, pool_timeout=2))
+            LOG.info('Command menu registered language=%s count=%d', language or 'default', len(commands))
+        except Exception:
+            # A menu API outage must not prevent the bot from receiving messages.
+            LOG.warning('Could not register command menu language=%s', language or 'default', exc_info=True)
+
+
 def build_app():
     comps = get_telegram_components()
     ApplicationBuilder = comps['ApplicationBuilder']
@@ -1548,6 +1564,7 @@ def build_app():
         .token(BOT_TOKEN)
         .request(request)
         .get_updates_request(get_updates_request)
+        .post_init(register_commands)
         .concurrent_updates(True)
         .build()
     )
