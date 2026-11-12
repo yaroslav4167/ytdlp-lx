@@ -12,7 +12,7 @@ Telegram bot for downloading media and audio from supported `yt-dlp` sites. It s
 - Separate audio/video streams are merged with FFmpeg.
 - Coub video is looped until its full audio track ends.
 - Output is kept under Telegram's 50 MiB bot upload limit where possible.
-- Direct and SOCKS5-proxy extraction race for metadata; the successful route is reused for the download.
+- Metadata remembers the successful direct/SOCKS5 route for 10 minutes per host. Unknown hosts race immediately; a slow cached route starts the alternative after 250 ms. Downloads reuse the preferred route with network-error fallback.
 - Telegram send/edit operations retry after transient network errors.
 - Playlists are rejected; only single media items are processed.
 
@@ -51,6 +51,21 @@ TELEGRAM_BOT_TOKEN=your_bot_token
 ```
 
 The bot stores temporary files in `downloads/`. They are removed after sending; stale temporary files are cleaned on startup and before new downloads.
+
+`MAX_PARALLEL_DOWNLOADS=2` in `.env` controls the number of simultaneous media
+jobs (download, conversion and upload together; valid range 1–8). Additional jobs
+wait in FIFO order and show their current queue position in the existing card,
+or in a plain status message. Search and metadata lookup remain independent.
+Restart the bot after changing the limit. Two jobs is the default for the shared
+single-CPU production server; increase only when CPU, memory and disk allow it.
+
+Stale cleanup includes `thumb_` and `final_` files. Active media identifiers and
+files retained for manual resend are protected. Cancelling an active blocking
+worker keeps its job slot until the worker stops.
+
+Runtime logs include timestamps and media job IDs, including yt-dlp worker
+messages. Bot tokens and URL credentials are redacted. Telegram's global error
+handler logs transient API/network errors separately from unexpected failures.
 
 ## Cloudflare WARP SOCKS5
 

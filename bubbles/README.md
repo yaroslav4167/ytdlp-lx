@@ -87,3 +87,18 @@ The initial eight-cover atlas is a fast preview. A private-chat background looku
 Missing artwork recovers in place: image fetches retry with public YouTube fallback sizes, and the client checks for individual covers missed during progressive updates. Bounded acknowledged replies return cached images or start a deduplicated fetch retry, without creating a new result message. Requests remain at least 5.2 seconds apart, stop after the missing covers are restored, and honor the existing download-request queue. Permanent source failures have a bounded retry count.
 
 Progress uses design G: three checkpoints share one line. The current checkpoint shows the actual stage percentage as a number inside a circular ring; completed stages show a check and pending stages their number. Unknown progress and upload use a rotating ring without a made-up percentage. The line advances within equal stage segments and stays at two thirds during upload. Reduced-motion preferences disable rotation. The locale renderer packs readable `I.key` references and `data-i18n` keys into an indexed table automatically to stay within the compressed HTML limit. Edit named keys in sources as before.
+
+Queued jobs reuse the centered processing view with a localized queue position;
+the saved progress/error state is restored when a slot becomes available. The
+queue is configured with `MAX_PARALLEL_DOWNLOADS` in `.env` (default 2).
+
+Normal progress publishing retains its 0.5-second cadence. Failed background
+edits back off through 0.5, 1, 2, 4 and 8 seconds, honoring longer Telegram
+`RetryAfter` values. The latest state is retained; user actions and terminal
+states publish immediately. A successful edit resets the backoff.
+
+`load_design` also shortens a fixed list of internal design selectors consistently
+across HTML/CSS/JS before inserting translations. Source templates keep their
+readable names; theme variables and protocol fields are preserved. Rebuild JS
+with `python -m bubbles.build`, then run `python -m bubbles.check`. New selector
+aliases must be checked against both rendered languages and all view states.

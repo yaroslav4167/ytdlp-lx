@@ -144,5 +144,6 @@
     "convert": "Preparing the file for Telegram…",
     "sending": "Uploading the file to Telegram…"
   },
-  "too_large_plain": "The file exceeds Telegram’s 50 MB limit. Choose a shorter recording."
+  "too_large_plain": "The file exceeds Telegram’s 50 MB limit. Choose a shorter recording.",
+  "queue": "In queue · #{position}"
 }

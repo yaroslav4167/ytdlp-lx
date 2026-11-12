@@ -33,18 +33,20 @@ function pick(index){
   var row=(S.rows||[]).find(function(r){return r[0]===selected;});
   if(row){el('search-audio').style.display=(row[4]&1)?'block':'none';el('search-video').style.display=(row[4]&2)?'block':'none';}
 }
+function make(tag,cls,parent,value){
+  var e=document.createElement(tag);e.className=cls;e.textContent=value||'';parent.appendChild(e);return e;
+}
 function search(){
   var rows=S.rows||[];
   if(!rows.some(function(r){return r[0]===selected;}))selected=rows.length?rows[0][0]:0;
   text('count',S.total);el('results').textContent='';
   rows.forEach(function(row){
-    var button=document.createElement('div');button.setAttribute('role','option');button.setAttribute('aria-selected',String(selected===row[0]));button.className='result'+(selected===row[0]?' selected':'');button.onclick=function(){pick(row[0]);};
-    var cover=document.createElement('span');cover.className='mini';cover.setAttribute('data-cover',String(row[0]));button.appendChild(cover);
-    var content=document.createElement('span');content.className='result-text';
-    var title=document.createElement('strong');title.textContent=titles[row[0]]||row[1];title.id='track'+row[0];content.appendChild(title);
-    var meta=document.createElement('span');meta.className='muted';meta.textContent=[row[2],row[3]].filter(Boolean).join(' · ');content.appendChild(meta);
-    button.appendChild(content);el('results').appendChild(button);
-
+    var button=make('div','result',el('results'));
+    button.setAttribute('role','option');button.onclick=function(){pick(row[0]);};
+    make('span','mini',button).setAttribute('data-cover',String(row[0]));
+    var content=make('span','result-text',button);
+    make('strong','',content,titles[row[0]]||row[1]).id='track'+row[0];
+    make('span','muted',content,[row[2],row[3]].filter(Boolean).join(' · '));
   });
   pick(selected);images();fit();hydrate();
 }

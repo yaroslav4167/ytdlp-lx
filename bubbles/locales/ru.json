@@ -144,5 +144,6 @@
     "convert": "Подготавливаем файл для Telegram…",
     "sending": "Загружаем файл в Telegram…"
   },
-  "too_large_plain": "Файл превышает лимит Telegram 50 МБ. Выберите запись короче."
+  "too_large_plain": "Файл превышает лимит Telegram 50 МБ. Выберите запись короче.",
+  "queue": "В очереди · № {position}"
 }
