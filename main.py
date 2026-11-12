@@ -11,12 +11,20 @@ import ipaddress
 import socket
 import shutil
 import math
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+from functools import wraps
+import inspect
+from runtime import MEDIA_JOBS, configure_logging, run_blocking
+from routes import RouteSelector
 from urllib.parse import urlparse
 from yandex_music import is_yandex_music_url, yandex_to_youtube
 from bubbles import BubbleService, RETAINED_FILES
 from bubbles.delivery import AmbiguousDelivery, send_media
 from bubbles.service import item as bubble_item, strings as bubble_strings, user_language
+
+LOG = logging.getLogger(__name__)
+ROUTES = RouteSelector(workers=MEDIA_JOBS.limit * 2 + 2)
+ACTIVE_MEDIA_IDS = set()
 
 # Runtime configuration. Secrets are supplied through the environment.
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -35,16 +43,16 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 def cleanup_stale_downloads(max_age=STALE_FILE_AGE):
     now = time.time()
-    prefixes = ("video_", "audio_", "input_", "output_")
+    prefixes = ("video_", "audio_", "input_", "output_", "thumb_", "final_")
     try:
         for entry in os.scandir(DOWNLOAD_DIR):
             if entry.is_file() and entry.name.startswith(prefixes) and entry.path not in RETAINED_FILES:
+                if any(uid in entry.name for uid in tuple(ACTIVE_MEDIA_IDS)):
+                    continue
                 if now - entry.stat().st_mtime > max_age:
                     os.remove(entry.path)
     except OSError as error:
-        print(f"Download cleanup error: {error}")
-
-cleanup_stale_downloads()
+        LOG.warning(f"Download cleanup error: {error}")
 
 # ---------------------------------------------------------------------------
 # yt-dlp integration and proxy fallback
@@ -53,19 +61,32 @@ def get_yt_dlp():
     import yt_dlp
     return yt_dlp
 
+class YDLLogger:
+    def debug(self, message):
+        if not message.startswith('[debug]'):
+            LOG.info('%s', message)
+
+    def warning(self, message):
+        LOG.warning('%s', message)
+
+    def error(self, message):
+        LOG.warning('%s', message)
+
 def ydl_options(options=None):
     bundled_deno = os.path.join(os.path.dirname(__file__), '.tools', 'deno')
     deno = os.environ.get('YTDLP_DENO') or (bundled_deno if os.path.isfile(bundled_deno) else shutil.which('deno'))
     result = {
         'js_runtimes': {'deno': {'path': deno}} if deno else {'node': {}},
         'socket_timeout': 15,
+        'logger': YDLLogger(),
+        'noprogress': True,
     }
     if options:
         result.update(options)
     return result
 
 class ProxyRetryYoutubeDL:
-    """Retry yt-dlp through the proxy after HTTP or network failures."""
+    """Prefer a fast cached route and retain the alternative for failures."""
 
     def __init__(self, options):
         self.options = options
@@ -79,37 +100,26 @@ class ProxyRetryYoutubeDL:
     def _run(self, method, *args, **kwargs):
         def attempt(proxy=None):
             options = dict(self.options)
-            if proxy:
+            if proxy is not None:
                 options['proxy'] = proxy
             with get_yt_dlp().YoutubeDL(options) as ydl:
                 return getattr(ydl, method)(*args, **kwargs)
 
-        url = args[0] if args and isinstance(args[0], str) else kwargs.get('url')
+        url = args[0] if args else kwargs.get('url')
+        if isinstance(url, (list, tuple)):
+            url = url[0] if url else None
         if url and url.startswith(('http://', 'https://')):
             validate_external_url(url)
 
-        if method == 'extract_info' and url and DOWNLOAD_PROXY:
-            executor = ThreadPoolExecutor(max_workers=2)
-            futures = {
-                executor.submit(attempt, route): route
-                for route in (None, DOWNLOAD_PROXY)
-            }
-            last_error = None
-            try:
-                for future in as_completed(futures):
-                    route = futures[future]
-                    try:
-                        result = future.result()
-                        print(f'yt-dlp selected {"proxy" if route else "direct"} route for {url}')
-                        return result
-                    except Exception as error:
-                        last_error = error
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
-            raise last_error
+        key = ROUTES.key(url)
+        if method == 'extract_info' and url and DOWNLOAD_PROXY and kwargs.get('download', True) is False:
+            result, route = ROUTES.extract(url, lambda route: attempt(DOWNLOAD_PROXY if route == 'proxy' else ''))
+            LOG.info('Metadata route=%s host=%s', route, key)
+            return result
 
+        route = ROUTES.preferred(key) if DOWNLOAD_PROXY else 'direct'
         try:
-            return attempt()
+            return attempt(DOWNLOAD_PROXY if route == 'proxy' else '')
         except Exception as error:
             error_text = str(error).lower()
             http_error = re.search(r'\b(?:40[1-9]|4[1-9]\d|[5-9]\d{2})\b', error_text)
@@ -118,13 +128,13 @@ class ProxyRetryYoutubeDL:
                 'connection aborted', 'temporary failure', 'network is unreachable',
                 'name or service not known',
             ))
-            if not http_error and not network_error:
+            if not DOWNLOAD_PROXY or not (http_error or network_error):
                 raise
-            proxy = DOWNLOAD_PROXY
-            if not proxy:
-                raise
-            print(f'yt-dlp network error: retrying {method} through configured proxy')
-            return attempt(proxy)
+            alternate = 'direct' if route == 'proxy' else 'proxy'
+            LOG.warning('Media route failed; retry method=%s route=%s host=%s', method, alternate, key)
+            result = attempt(DOWNLOAD_PROXY if alternate == 'proxy' else '')
+            ROUTES.remember(key, alternate)
+            return result
 
     def extract_info(self, *args, **kwargs):
         return self._run('extract_info', *args, **kwargs)
@@ -191,7 +201,7 @@ async def resolve_tiktok_short_url(url: str) -> str:
         validate_external_url(final_url)
         return final_url
     except Exception as error:
-        print(f'TikTok short URL resolution error: {error}')
+        LOG.warning(f'TikTok short URL resolution error: {error}')
         return url
 
 def is_spotify_url(url: str) -> bool:
@@ -271,7 +281,7 @@ async def spotify_to_youtube(url: str):
             return None, "Could not find the track on YouTube."
         return f"https://www.youtube.com/watch?v={results[0]['id']}", None
     except Exception as exc:
-        print(f"Spotify error: {exc}")
+        LOG.warning(f"Spotify error: {exc}")
         return None, "Error while contacting Spotify."
 
 def get_telegram_components():
@@ -357,7 +367,7 @@ def make_progress_hook(msg, loop, words=None):
             elif status == 'error':
                 await edit_progress(words["download_error_plain"])
         except Exception as e:
-            print(f"Progress update error: {e}")
+            LOG.warning(f"Progress update error: {e}")
 
     pending = {'latest': None}
 
@@ -365,7 +375,7 @@ def make_progress_hook(msg, loop, words=None):
         try:
             pending['latest'] = asyncio.run_coroutine_threadsafe(progress_hook_async(dict(d)), loop)
         except Exception as e:
-            print(f"Progress task error: {e}")
+            LOG.warning(f"Progress task error: {e}")
 
     async def flush():
         if pending['latest'] is not None:
@@ -409,7 +419,7 @@ async def probe_url(url: str):
             return ydl.extract_info(url, download=False)
 
     try:
-        info = await loop.run_in_executor(None, _probe)
+        info = await run_blocking(_probe)
     except Exception:
         return None
     return info
@@ -423,7 +433,7 @@ async def edit_text_retry(message, text, **kwargs):
             return True
         except Exception as error:
             if delay == 8:
-                print(f"Message edit error after retries: {error}")
+                LOG.warning(f"Message edit error after retries: {error}")
     return False
 
 async def telegram_retry(operation):
@@ -436,7 +446,7 @@ async def telegram_retry(operation):
         except Exception as error:
             last_error = error
             if delay == 8:
-                print(f"Telegram request error after retries: {error}")
+                LOG.warning(f"Telegram request error after retries: {error}")
     raise last_error
 
 async def download_tiktok_photos(url: str):
@@ -588,6 +598,13 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
     loop = asyncio.get_running_loop()
 
     download_part = None
+    active_ids = set()
+
+    def new_id():
+        uid = uuid.uuid4().hex
+        active_ids.add(uid)
+        ACTIVE_MEDIA_IDS.add(uid)
+        return uid
 
     def _hook(d):
         if progress_cb is not None:
@@ -616,7 +633,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
 
         # --- MP3 ---
         if format_choice == "mp3":
-            uid = uuid.uuid4().hex
+            uid = new_id()
 
             audio_path = os.path.join(DOWNLOAD_DIR, f"audio_{uid}.webm")
             thumb_path = os.path.join(DOWNLOAD_DIR, f"thumb_{uid}.jpg")
@@ -785,7 +802,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
                     sized_muxed,
                     key=lambda f: (format_height(f), f.get("tbr") or 0),
                 )
-                uid = uuid.uuid4().hex
+                uid = new_id()
                 direct_ext = direct_format.get('ext') or 'mp4'
                 output_path = os.path.join(DOWNLOAD_DIR, f"output_{uid}.mp4")
                 direct_path = os.path.join(DOWNLOAD_DIR, f"input_{uid}.{direct_ext}")
@@ -866,7 +883,7 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             video_needs_transcode = video_ext != "mp4" or is_coub
 
             # пути
-            uid = uuid.uuid4().hex
+            uid = new_id()
             video_path = os.path.join(DOWNLOAD_DIR, f"video_{uid}.{video_ext}")
             audio_path = os.path.join(DOWNLOAD_DIR, f"audio_{uid}.{audio_ext or 'webm'}")
             output_path = os.path.join(DOWNLOAD_DIR, f"output_{uid}.mp4")
@@ -935,7 +952,10 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
             # возвращаем итоговый файл
             return output_path, info
 
-    return await loop.run_in_executor(None, _download)
+    try:
+        return await run_blocking(_download, wait_on_cancel=True)
+    finally:
+        ACTIVE_MEDIA_IDS.difference_update(active_ids)
 
 def safe_meta(text: str) -> str:
     if not text:
@@ -998,6 +1018,37 @@ async def send_media_file(context, chat_id, filename, info):
     return await send_media(send_file)
 
 
+def queued_media(function):
+    signature = inspect.signature(function)
+
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        context, source = bound.arguments['context'], bound.arguments['source_message']
+        msg = bound.arguments.get('msg')
+        words = context_words(context)
+        queued = False
+
+        async def position(number):
+            nonlocal msg, queued
+            if number == 0 and not queued:
+                return
+            queued = number > 0
+            if getattr(msg, 'is_bubble', False):
+                await msg.queue_position(number)
+            else:
+                value = words['queue'].format(position=number) if number else words['download_plain']
+                if msg is None:
+                    msg = await telegram_retry(lambda: context.bot.send_message(chat_id=source.chat_id, text=value))
+                    bound.arguments['msg'] = msg
+                else:
+                    await edit_text_retry(msg, value)
+
+        async with MEDIA_JOBS.slot(position):
+            return await function(*bound.args, **bound.kwargs)
+    return wrapped
+
+
 async def download_and_send(context, source_message, url, format_choice, msg=None, delete_source=False):
     service = bubble_service(context)
     if (not getattr(msg, 'is_bubble', False) and service
@@ -1029,6 +1080,11 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
             service.busy_users.add(owner)
             await service.run(card, 'download')
             return
+    return await _download_and_send(context, source_message, url, format_choice, msg, delete_source)
+
+
+@queued_media
+async def _download_and_send(context, source_message, url, format_choice, msg=None, delete_source=False):
     cleanup_stale_downloads()
     words = context_words(context)
     chat_id = source_message.chat_id
@@ -1047,7 +1103,7 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
         filename, info = await download_media(url, format_choice=format_choice, progress_cb=progress_hook)
         await progress_hook.flush()
     except Exception as e:
-        print(f"Download error: {e}")
+        LOG.warning(f"Download error: {e}")
         if isinstance(e, MediaTooLarge):
             if getattr(msg, 'is_bubble', False):
                 await msg.error('too_large')
@@ -1071,10 +1127,11 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
     try:
         await send_media_file(context, chat_id, filename, info)
         sent = True
+        LOG.info('Media sent bytes=%d format=%s', os.path.getsize(filename), os.path.splitext(filename)[1])
         if getattr(msg, 'is_bubble', False):
             await msg.complete()
     except Exception as e:
-        print(f"File sending error: {e}")
+        LOG.warning(f"File sending error: {e}")
         if getattr(msg, 'is_bubble', False):
             await msg.send_failed(filename, info, kind='uncertain' if isinstance(e, AmbiguousDelivery) else 'send')
             return
@@ -1085,7 +1142,7 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
         os.remove(filename)
     except Exception as e:
         if sent or os.path.exists(filename):
-            print(f"File deletion error: {e}")
+            LOG.warning(f"File deletion error: {e}")
 
     cleanup_stale_downloads()
 
@@ -1094,6 +1151,7 @@ async def download_and_send(context, source_message, url, format_choice, msg=Non
     except Exception:
         pass
 
+@queued_media
 async def download_and_send_tiktok_photos(context, source_message, url, msg=None):
     cleanup_stale_downloads()
     chat_id = source_message.chat_id
@@ -1120,7 +1178,7 @@ async def download_and_send_tiktok_photos(context, source_message, url, msg=None
             await telegram_retry(send_photo)
             sent = True
     except Exception as error:
-        print(f"Photo sending error: {error}")
+        LOG.warning(f"Photo sending error: {error}")
         await telegram_retry(lambda: context.bot.send_message(
             chat_id=chat_id, text=f"Photo sending error.\n{error}"))
     finally:
@@ -1137,6 +1195,7 @@ async def download_and_send_tiktok_photos(context, source_message, url, msg=None
         except Exception:
             pass
 
+@queued_media
 async def download_and_send_instagram_photo(context, source_message, url, msg=None):
     cleanup_stale_downloads()
     chat_id = source_message.chat_id
@@ -1189,7 +1248,7 @@ async def search_youtube(query: str):
         with ProxyRetryYoutubeDL(ydl_options(ydl_opts)) as ydl:
             return ydl.extract_info(f"ytsearch8:{query}", download=False)
 
-    info = await loop.run_in_executor(None, _search)
+    info = await run_blocking(_search)
     return info.get('entries', [])[:8] if info and info.get('entries') else []
 
 def store_callback_url(context, url):
@@ -1363,13 +1422,13 @@ async def process_message(update, context):
         try:
             await edit_text_retry(msg, words["choose_plain"], reply_markup=keyboard)
         except Exception as e:
-            print(f"Message edit error: {e}")
+            LOG.warning(f"Message edit error: {e}")
         return
 
     try:
         results = await asyncio.wait_for(search_youtube(query), timeout=SEARCH_TIMEOUT)
     except Exception as exception:
-        print(f'Search failed: {type(exception).__name__}')
+        LOG.warning(f'Search failed: {type(exception).__name__}')
         if not await try_bubble(context,update.message,msg,[],query,view='search',error='search'):
             await edit_text_retry(msg,words['search_failed'])
         return
@@ -1450,6 +1509,15 @@ async def callback(update, context):
 
     await download_and_send(context, query.message, url, format_choice, delete_source=True)
 
+async def handle_error(update, context):
+    error = context.error
+    from telegram.error import NetworkError, RetryAfter
+    if isinstance(error, (NetworkError, RetryAfter)):
+        LOG.warning('Telegram network/API error: %s: %s', type(error).__name__, error)
+    else:
+        LOG.error('Unhandled Telegram handler error', exc_info=(type(error), error, error.__traceback__))
+
+
 def build_app():
     comps = get_telegram_components()
     ApplicationBuilder = comps['ApplicationBuilder']
@@ -1487,6 +1555,7 @@ def build_app():
     from telegram.ext import TypeHandler
     service = BubbleService(download_and_send, send_media_file)
     app.bot_data['bubbles'] = service
+    app.add_error_handler(handle_error)
     app.add_handler(TypeHandler(Update, service.handle_widget), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("bubbles", bubble_mode))
@@ -1497,6 +1566,9 @@ def build_app():
     return app
 
 def run():
+    configure_logging()
+    cleanup_stale_downloads()
+    LOG.info('Starting bot parallel_downloads=%d', MEDIA_JOBS.limit)
     app = build_app()
     from telegram import Update
     app.run_polling(allowed_updates=list(Update.ALL_TYPES) + ["widget_query"])

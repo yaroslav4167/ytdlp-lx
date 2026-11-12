@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 import time
 import zlib
+from runtime import MEDIA_JOBS
 
 ROOT = Path(__file__).parent
 LOG = logging.getLogger(__name__)
@@ -52,6 +53,19 @@ def state_json(state):
     return result
 
 
+def compact_selectors(source):
+    # These design-only tokens have no protocol meaning. Compact them together
+    # in HTML, CSS and JS, while preserving readable source templates. Boundaries
+    # exclude hyphens so Telegram's theme variables are never rewritten.
+    names = ('media-title', 'media-meta', 'result-text', 'muted', 'mini', 'pill',
+             'feedback', 'spread', 'actions', 'flow', 'rail', 'context', 'row',
+             'loading-cover', 'progress-hint', 'filetype', 'search-audio', 'search-video',
+             'processing-title', 'point', 'step', 'num', 'track', 'results')
+    aliases = {name:'_' + chr(97 + i) for i, name in enumerate(names)}
+    return re.sub(r'(?<![\w-])(?:' + '|'.join(names) + r')(?=$|[^\w-]|[0-9])',
+                  lambda match:aliases[match[0]], source)
+
+
 def load_design(language):
     name = os.environ.get('BUBBLES_DESIGN', 'default')
     if not name.replace('-', '').replace('_', '').isalnum():
@@ -78,10 +92,13 @@ def load_design(language):
     translations = [words[key] for key in keys]
     source = re.sub(r'\bI\.([a-z_]+)',lambda m:f'I[{positions[m[1]]}]',source)
     source = re.sub(r'data-i18n="([a-z_]+)"',lambda m:f'data-i18n="{positions[m[1]]}"',source)
+    source = compact_selectors(source)
     source = source.replace('__I18N__', json.dumps(translations, ensure_ascii=True,
                                                   separators=(',', ':')).replace('<', '\\u003c'))
     source = source.replace('lang="ru"', f'lang="{locale(language)}"')
-    source = re.sub(r"[\n\r]+\s*", "", source)
+    # Keep JS line boundaries intact (including a readable-source fallback).
+    markup, script = source.split('<script>', 1)
+    source = re.sub(r"[\n\r]+\s*", "", markup) + '<script>' + script.strip()
     raw = source.encode()
     if len(raw) > 32768 or len(zlib.compress(raw, 9)) > 4096:
         raise ValueError(f'Widget HTML exceeds Telegram size limits: {len(raw)} raw / {len(zlib.compress(raw, 9))} compressed')
@@ -199,6 +216,9 @@ class Bubble:
         self.cover_replay = None
         self.cover_repairs = {}
         self.cover_failures = {}
+        self.publish_failures = 0
+        self.retry_publish_at = 0
+        self.queued_state = None
 
     def search_results(self):
         self.state['title']=shorten(self.state.get('title'),64)
@@ -235,9 +255,11 @@ class Bubble:
             return state_json({'atlas':self.cover_atlas} if self.cover_atlas else {})
         return state_json({str(i):self.covers[i] for i in self.cover_indices() if self.covers.get(i)})
 
-    async def publish(self, artwork=None):
+    async def publish(self, artwork=None, background=False):
         """Serialize updates so late progress cannot overwrite terminal states."""
         async with self.lock:
+            if background and time.monotonic() < self.retry_publish_at:
+                return
             if self.deleted or (artwork is not None and (self.state.get('view')!='search' or self.state.get('error')
                     or self.service.entries.get((self.chat_id,self.message_id)) is not self)):
                 return
@@ -251,6 +273,8 @@ class Bubble:
                                        chat_data=serialized, public_data=covers)
                 self.published = serialized
                 self.published_covers = covers
+                self.publish_failures = 0
+                self.retry_publish_at = 0
                 # Older cards may still carry a caption/keyboard from the first rollout.
                 if not getattr(self, 'clean_chrome', False):
                     await self.context.bot.edit_message_caption(chat_id=self.chat_id,
@@ -258,8 +282,31 @@ class Bubble:
                         connect_timeout=3, read_timeout=4, write_timeout=4, pool_timeout=1)
                     self.clean_chrome = True
             except Exception as error:
-                if 'message is not modified' not in str(error).lower():
-                    LOG.warning('Widget update failed (%s)', type(error).__name__)
+                if 'message is not modified' in str(error).lower():
+                    self.published, self.published_covers = serialized, covers
+                    self.publish_failures = 0
+                    self.retry_publish_at = 0
+                else:
+                    self.publish_failures += 1
+                    delay = min(8, .5 * 2 ** min(self.publish_failures - 1, 4))
+                    retry_after = getattr(error, 'retry_after', 0)
+                    if hasattr(retry_after, 'total_seconds'):
+                        retry_after = retry_after.total_seconds()
+                    delay = max(delay, float(retry_after or 0))
+                    self.retry_publish_at = time.monotonic() + delay
+                    LOG.warning('Widget update failed (%s); background retry in %.1fs', type(error).__name__, delay)
+
+    async def queue_position(self, position):
+        if position:
+            if self.queued_state is None:
+                self.queued_state = dict(self.state)
+            self.state = {'view':'processing', 'title':self.queued_state.get('title',''),
+                          'stage_title':self.words['queue'].format(position=position)}
+        elif self.queued_state is not None:
+            self.state, self.queued_state = self.queued_state, None
+        else:
+            return
+        await self.publish()
 
     def start_cover_replay(self):
         if not any(v.get('thumbnail') for v in self.items):return
@@ -272,20 +319,20 @@ class Bubble:
         except asyncio.TimeoutError:
             return
         if self.cover_atlas:
-            await self.publish(state_json({'atlas':self.cover_atlas}))
+            await self.publish(state_json({'atlas':self.cover_atlas}), background=True)
         for index, image in list(self.covers.items()):
             if not image:continue
             await asyncio.sleep(1.1)
             if (self.deleted or self.state.get('view')!='search' or self.state.get('error')
                     or self.service.entries.get((self.chat_id,self.message_id)) is not self):return
-            await self.publish(state_json({str(index):image}))
+            await self.publish(state_json({str(index):image}), background=True)
 
     async def repair_cover(self, index):
         image=await thumbnail(self.items[index].get('thumbnail'),hero=True)
         if self.deleted or self.service.entries.get((self.chat_id,self.message_id)) is not self:return
         if image:
             self.covers[index]=image
-            await self.publish(state_json({str(index):image}))
+            await self.publish(state_json({str(index):image}), background=True)
         else:
             self.cover_failures[index]=self.cover_failures.get(index,0)+1
             LOG.warning('Cover fetch failed for row %d (attempt %d)',index,self.cover_failures[index])
@@ -362,7 +409,7 @@ class Bubble:
                 return
             before = state_json(self.state)
             self.last_progress = time.monotonic()
-            await self.publish()
+            await self.publish(background=True)
             await asyncio.sleep(.5)
             if state_json(self.state) == before and self.published == before:
                 return
@@ -539,7 +586,7 @@ class BubbleService:
                 entry.covers.clear();entry.cover_atlas = None
                 return
             if self.entries.get((entry.chat_id, entry.message_id)) is entry:
-                await entry.publish()
+                await entry.publish(background=True)
         except Exception as exception:
             LOG.warning('Background artwork failed (%s)', type(exception).__name__)
         finally:
@@ -658,15 +705,16 @@ class BubbleService:
     async def run(self, entry, action):
         try:
             if action == 'resend':
-                await entry.edit_text('📤 Sending file...')
-                try:
-                    await self.send_file(entry.context, entry.chat_id, entry.filename, entry.info)
-                except Exception as exception:
-                    await entry.error('uncertain' if isinstance(exception, AmbiguousDelivery) else 'send')
-                else:
-                    filename = entry.filename
-                    await entry.complete()
-                    Path(filename).unlink(missing_ok=True)
+                async with MEDIA_JOBS.slot(entry.queue_position):
+                    await entry.edit_text('📤 Sending file...')
+                    try:
+                        await self.send_file(entry.context, entry.chat_id, entry.filename, entry.info)
+                    except Exception as exception:
+                        await entry.error('uncertain' if isinstance(exception, AmbiguousDelivery) else 'send')
+                    else:
+                        filename = entry.filename
+                        await entry.complete()
+                        Path(filename).unlink(missing_ok=True)
             else:
                 await entry.begin(entry.selected, entry.format)
                 await self.download(entry.context, entry.source, entry.items[entry.selected]['url'],
