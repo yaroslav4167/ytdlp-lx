@@ -13,6 +13,7 @@ import shutil
 import math
 import logging
 from functools import wraps
+from metadata_cache import MetadataCache
 import inspect
 from runtime import MEDIA_JOBS, configure_logging, run_blocking
 from routes import RouteSelector
@@ -25,6 +26,7 @@ from bubbles.service import item as bubble_item, strings as bubble_strings, user
 LOG = logging.getLogger(__name__)
 ROUTES = RouteSelector(workers=MEDIA_JOBS.limit * 2 + 2)
 ACTIVE_MEDIA_IDS = set()
+METADATA = MetadataCache(ttl=90, limit=32)
 
 # Runtime configuration. Secrets are supplied through the environment.
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -407,6 +409,9 @@ def run_ffmpeg(command, duration, progress_hook=None):
     return process.wait()
 
 async def probe_url(url: str):
+    cached = METADATA.get(url)
+    if cached is not None:
+        return cached
     loop = asyncio.get_running_loop()
 
     def _probe():
@@ -422,6 +427,7 @@ async def probe_url(url: str):
         info = await run_blocking(_probe)
     except Exception:
         return None
+    METADATA.put(url, info)
     return info
 
 async def edit_text_retry(message, text, **kwargs):
@@ -624,8 +630,11 @@ async def download_media(url: str, format_choice: str, progress_cb=None):
 
         _hook({'status':'preparing', 'detail':'metadata'})
         # Получаем список форматов
-        ydl_probe = ProxyRetryYoutubeDL(ydl_options({'quiet': True}))
-        info = ydl_probe.extract_info(url, download=False)
+        info = METADATA.get(url)
+        if info is None:
+            ydl_probe = ProxyRetryYoutubeDL(ydl_options({'quiet': True}))
+            info = ydl_probe.extract_info(url, download=False)
+            METADATA.put(url, info)
 
         _hook({'status':'preparing', 'detail':'formats'})
         formats = info.get("formats", [])
@@ -1403,8 +1412,16 @@ async def try_bubble(context, source, progress_message, items, title='', view='f
     return None
 
 
-async def process_message(update, context):
-    text = (update.message.text or "").strip()
+async def search_command(update, context):
+    text = " ".join(context.args or []).strip()
+    if not text:
+        await telegram_retry(lambda: update.message.reply_text(ui_words(update, context)["search_usage"]))
+        return
+    await process_message(update, context, text=text)
+
+
+async def process_message(update, context, text=None):
+    text = (update.message.text or "").strip() if text is None else text
     words = ui_words(update, context)
     service = bubble_service(context)
     msg = await service.send_loading(context, update.message) if service else None
@@ -1619,6 +1636,7 @@ def build_app():
     app.add_error_handler(handle_error)
     app.add_handler(TypeHandler(Update, service.handle_widget), group=-1)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("search", search_command))
     app.add_handler(CommandHandler("bubbles", bubble_mode))
     app.add_handler(CommandHandler("plain", bubble_mode))
     app.add_handler(CommandHandler("language", language_command))

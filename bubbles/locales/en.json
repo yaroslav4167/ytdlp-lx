@@ -42,7 +42,7 @@
   "widget_off": "Plain messages and buttons enabled.",
   "language_set": "Language: {language}",
   "language_help": "Choose a language:",
-  "start": "Send a link or a track/video name.\nChoose audio or video after searching.\n/bubbles — interactive cards\n/plain — plain messages\n/language — select language",
+  "start": "Send a link or a track/video name.\nChoose audio or video after searching.\n/bubbles — interactive cards\n/plain — plain messages\n/language — select language\n/search — search by title or link (also in groups)",
   "unknown": "Unknown artist",
   "range": "{start}–{end} of {total}",
   "problems": {
@@ -150,8 +150,10 @@
     "start": "How to use the bot",
     "bubbles": "Enable interactive cards",
     "plain": "Use plain messages and buttons",
-    "language": "Choose a language"
+    "language": "Choose a language",
+    "search": "Search tracks, videos or process a link"
   },
   "language_auto": "Automatic",
-  "language_set_auto": "Language: automatic ({language})"
+  "language_set_auto": "Language: automatic ({language})",
+  "search_usage": "Add a title or link after the command:\n/search Daft Punk\n/search https://youtu.be/…\nIn a group: /search@ytdlp_lx_bot Daft Punk"
 }
